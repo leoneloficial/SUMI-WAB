@@ -7,9 +7,7 @@ const lastSearchByChat = new Map();
 setInterval(() => {
   const now = Date.now();
   for (const [jid, data] of lastSearchByChat.entries()) {
-    if (!data || now - data.ts > 10 * 60 * 1000) {
-      lastSearchByChat.delete(jid);
-    }
+    if (!data || now - data.ts > 10 * 60 * 1000) lastSearchByChat.delete(jid);
   }
 }, 60 * 1000);
 
@@ -76,7 +74,7 @@ function buildResultsMessage(query, videos) {
   );
 }
 
-function buildChosenMessage(v, isVideoMode) {
+function buildChosenText(v, isVideoMode) {
   const dur = v.timestamp || v.duration?.timestamp || "N/A";
   const chan = v.author?.name || "N/A";
   const views = v.views ? humanViews(v.views) : null;
@@ -92,6 +90,21 @@ function buildChosenMessage(v, isVideoMode) {
     `🔗 ${v.url}\n\n` +
     (isVideoMode ? "📥 Descargando *MP4*..." : "🎧 Descargando *MP3*...")
   );
+}
+
+function makeExternalPreview({ title, body, thumbnailUrl, sourceUrl }) {
+  if (!thumbnailUrl) return undefined;
+  return {
+    externalAdReply: {
+      title: title || "YouTube",
+      body: body || "",
+      thumbnailUrl,
+      sourceUrl: sourceUrl || "",
+      mediaType: 1,
+      renderLargerThumbnail: true,
+      showAdAttribution: false,
+    },
+  };
 }
 
 export default {
@@ -160,8 +173,7 @@ export default {
             {
               text:
                 headerBox("PLAY") +
-                `\n\n` +
-                `✅ Elegiste: *${chosen.title}*\n` +
+                `\n\n✅ Elegiste: *${chosen.title}*\n` +
                 `🔗 ${chosen.url}\n\n` +
                 `⚠️ No encontré el comando *${cmdName}*.\n` +
                 `Usa manual:\n• *.ytmp3 ${chosen.url}*`,
@@ -170,10 +182,22 @@ export default {
           );
         }
 
-        // Preview bonito + estado
+        // ✅ Miniatura del ELEGIDO antes de descargar
+        const dur = chosen.timestamp || chosen.duration?.timestamp || "N/A";
+        const chan = chosen.author?.name || "N/A";
+        const preview = makeExternalPreview({
+          title: chosen.title,
+          body: `⏱ ${dur} • 👤 ${chan}`,
+          thumbnailUrl: chosen.thumbnail,
+          sourceUrl: chosen.url,
+        });
+
         await sock.sendMessage(
           from,
-          { text: buildChosenMessage(chosen, isVideoMode) },
+          {
+            text: buildChosenText(chosen, isVideoMode),
+            contextInfo: preview,
+          },
           { quoted: msg }
         );
 
@@ -206,12 +230,8 @@ export default {
       );
 
       const res = await yts(text);
-
-      // Filtra: evita lives muy largos (opcional), y toma 5
       const videosAll = Array.isArray(res?.videos) ? res.videos : [];
-      const videos = videosAll
-        .filter(v => v?.url && v?.title)
-        .slice(0, 5);
+      const videos = videosAll.filter(v => v?.url && v?.title).slice(0, 5);
 
       if (!videos.length) {
         return await sock.sendMessage(
@@ -224,10 +244,23 @@ export default {
       // Guardar resultados
       lastSearchByChat.set(from, { ts: Date.now(), query: text, results: videos });
 
-      // Mandar lista bonita
+      // ✅ Miniatura del TOP resultado al mostrar lista
+      const top = videos[0];
+      const topDur = top.timestamp || top.duration?.timestamp || "N/A";
+      const topChan = top.author?.name || "N/A";
+      const topPreview = makeExternalPreview({
+        title: `Top: ${top.title}`,
+        body: `⏱ ${topDur} • 👤 ${topChan}`,
+        thumbnailUrl: top.thumbnail,
+        sourceUrl: top.url,
+      });
+
       await sock.sendMessage(
         from,
-        { text: buildResultsMessage(text, videos) },
+        {
+          text: buildResultsMessage(text, videos),
+          contextInfo: topPreview,
+        },
         { quoted: msg }
       );
     } catch (err) {
@@ -238,4 +271,3 @@ export default {
     }
   },
 };
-
