@@ -27,10 +27,8 @@ function saveVip(data) {
   fs.writeFileSync(VIP_FILE, JSON.stringify(data, null, 2));
 }
 
-function normalizarNumero(x) {
-  // "51907376960@s.whatsapp.net" -> "51907376960"
-  // "51907376960:16@s.whatsapp.net" -> "51907376960"
-  // "+51907376960" -> "51907376960"
+function normId(x) {
+  // Para números y LID: deja solo dígitos
   return String(x || "")
     .split("@")[0]
     .split(":")[0]
@@ -38,25 +36,35 @@ function normalizarNumero(x) {
     .trim();
 }
 
-function getSenderNumber(msg, from) {
-  const jid = msg?.key?.participant || msg?.participant || msg?.key?.remoteJid || from;
-  return normalizarNumero(jid);
+function getSenderJid(msg, from) {
+  return msg?.key?.participant || msg?.participant || msg?.key?.remoteJid || from;
 }
 
-function getOwners(settings) {
-  const owners = [];
-  if (Array.isArray(settings?.ownerNumbers)) owners.push(...settings.ownerNumbers);
-  if (typeof settings?.ownerNumber === "string") owners.push(settings.ownerNumber);
-  if (Array.isArray(settings?.owners)) owners.push(...settings.owners);
-  if (typeof settings?.owner === "string") owners.push(settings.owner);
-  if (typeof settings?.botNumber === "string") owners.push(settings.botNumber);
-  return owners.map(normalizarNumero).filter(Boolean);
+function getSenderId(msg, from) {
+  return normId(getSenderJid(msg, from));
+}
+
+function getOwnersIds(settings) {
+  const ids = [];
+
+  // ownerNumbers
+  if (Array.isArray(settings?.ownerNumbers)) ids.push(...settings.ownerNumbers);
+  if (typeof settings?.ownerNumber === "string") ids.push(settings.ownerNumber);
+
+  // ✅ NUEVO: ownerLids (para @lid)
+  if (Array.isArray(settings?.ownerLids)) ids.push(...settings.ownerLids);
+  if (typeof settings?.ownerLid === "string") ids.push(settings.ownerLid);
+
+  // opcional
+  if (typeof settings?.botNumber === "string") ids.push(settings.botNumber);
+
+  return ids.map(normId).filter(Boolean);
 }
 
 function esOwner(msg, from, settings) {
-  const sender = getSenderNumber(msg, from);
-  const owners = getOwners(settings);
-  return owners.includes(sender);
+  const senderId = getSenderId(msg, from);
+  const owners = getOwnersIds(settings);
+  return owners.includes(senderId);
 }
 
 // 7d / 12h / 30m / 20s
@@ -87,21 +95,12 @@ function fmtMs(ms) {
   return `${s}s`;
 }
 
-function limpiarVencidos(data) {
+function limpiar(data) {
   const now = Date.now();
   for (const [num, info] of Object.entries(data.users || {})) {
-    if (!info) {
-      delete data.users[num];
-      continue;
-    }
-    if (typeof info.expiresAt === "number" && now >= info.expiresAt) {
-      delete data.users[num];
-      continue;
-    }
-    if (typeof info.usesLeft === "number" && info.usesLeft <= 0) {
-      delete data.users[num];
-      continue;
-    }
+    if (!info) delete data.users[num];
+    else if (typeof info.expiresAt === "number" && now >= info.expiresAt) delete data.users[num];
+    else if (typeof info.usesLeft === "number" && info.usesLeft <= 0) delete data.users[num];
   }
 }
 
@@ -116,17 +115,15 @@ export default {
     try {
       if (!sock || !from) return;
 
-      // ✅ Solo owner
       if (!esOwner(msg, from, settings)) {
         return sock.sendMessage(from, { text: "👑 Solo el owner puede usar este comando." }, { quoted: msg });
       }
 
       const sub = String(args[0] || "").toLowerCase().trim();
       const data = readVip();
-      limpiarVencidos(data);
+      limpiar(data);
       saveVip(data);
 
-      // ✅ Ayuda
       if (!sub) {
         return sock.sendMessage(
           from,
@@ -134,25 +131,20 @@ export default {
             text:
               `🔒 *Panel VIP*\n\n` +
               `➕ Dar VIP:\n` +
-              `• *.vip add 519xxxxxxx 7d 50*\n` +
-              `   duración: 7d/12h/30m/20s\n` +
-              `   usos: 50\n\n` +
+              `• *.vip add 519xxxxxxx 7d 50*\n\n` +
               `➖ Quitar VIP:\n` +
               `• *.vip del 519xxxxxxx*\n\n` +
               `📋 Ver:\n` +
               `• *.vip list*\n` +
-              `• *.vip check 519xxxxxxx*\n`,
+              `• *.vip check 519xxxxxxx*`,
           },
           { quoted: msg }
         );
       }
 
-      // ✅ List
       if (sub === "list") {
         const users = Object.entries(data.users || {});
-        if (!users.length) {
-          return sock.sendMessage(from, { text: "📋 VIP actuales: (vacío)" }, { quoted: msg });
-        }
+        if (!users.length) return sock.sendMessage(from, { text: "📋 VIP actuales: (vacío)" }, { quoted: msg });
 
         const now = Date.now();
         const lines = users
@@ -166,32 +158,22 @@ export default {
         return sock.sendMessage(from, { text: `📋 *VIP actuales:*\n\n${lines.join("\n")}` }, { quoted: msg });
       }
 
-      // ✅ Check
       if (sub === "check") {
-        const num = normalizarNumero(args[1]);
-        if (!num) {
-          return sock.sendMessage(from, { text: "⚠️ Uso: *.vip check 519xxxxxxx*" }, { quoted: msg });
-        }
+        const num = normId(args[1]);
+        if (!num) return sock.sendMessage(from, { text: "⚠️ Uso: *.vip check 519xxxxxxx*" }, { quoted: msg });
 
         const info = data.users?.[num];
-        if (!info) {
-          return sock.sendMessage(from, { text: `❌ *${num}* no es VIP.` }, { quoted: msg });
-        }
+        if (!info) return sock.sendMessage(from, { text: `❌ *${num}* no es VIP.` }, { quoted: msg });
 
         const now = Date.now();
         const left = typeof info.usesLeft === "number" ? info.usesLeft : "∞";
         const exp = typeof info.expiresAt === "number" ? fmtMs(info.expiresAt - now) : "∞";
 
-        return sock.sendMessage(
-          from,
-          { text: `✅ *${num}* es VIP\n🎟️ usos: *${left}*\n⏳ vence en: *${exp}*` },
-          { quoted: msg }
-        );
+        return sock.sendMessage(from, { text: `✅ *${num}* es VIP\n🎟️ usos: *${left}*\n⏳ vence en: *${exp}*` }, { quoted: msg });
       }
 
-      // ✅ Add: .vip add <num> <dur> <uses>
       if (sub === "add") {
-        const num = normalizarNumero(args[1]);
+        const num = normId(args[1]);
         const durStr = args[2];
         const usesStr = args[3];
 
@@ -201,49 +183,28 @@ export default {
 
         const durMs = parseDurationToMs(durStr);
         const uses = parseInt(usesStr, 10);
+        if (!durMs) return sock.sendMessage(from, { text: "⚠️ Duración inválida (7d/12h/30m/20s)." }, { quoted: msg });
+        if (!Number.isFinite(uses) || uses <= 0) return sock.sendMessage(from, { text: "⚠️ Usos inválidos." }, { quoted: msg });
 
-        if (!durMs) {
-          return sock.sendMessage(from, { text: "⚠️ Duración inválida. Ej: 7d / 12h / 30m / 20s" }, { quoted: msg });
-        }
-        if (!Number.isFinite(uses) || uses <= 0) {
-          return sock.sendMessage(from, { text: "⚠️ Usos inválidos. Ej: 50" }, { quoted: msg });
-        }
-
-        data.users[num] = {
-          expiresAt: Date.now() + durMs,
-          usesLeft: uses,
-        };
+        data.users[num] = { expiresAt: Date.now() + durMs, usesLeft: uses };
         saveVip(data);
 
-        return sock.sendMessage(
-          from,
-          { text: `✅ VIP agregado: *${num}*\n⏳ duración: *${durStr}*\n🎟️ usos: *${uses}*` },
-          { quoted: msg }
-        );
+        return sock.sendMessage(from, { text: `✅ VIP agregado: *${num}*\n⏳ duración: *${durStr}*\n🎟️ usos: *${uses}*` }, { quoted: msg });
       }
 
-      // ✅ Del
       if (sub === "del" || sub === "remove" || sub === "rm") {
-        const num = normalizarNumero(args[1]);
-        if (!num) {
-          return sock.sendMessage(from, { text: "⚠️ Uso: *.vip del 519xxxxxxx*" }, { quoted: msg });
-        }
+        const num = normId(args[1]);
+        if (!num) return sock.sendMessage(from, { text: "⚠️ Uso: *.vip del 519xxxxxxx*" }, { quoted: msg });
 
-        if (data.users?.[num]) delete data.users[num];
+        delete data.users[num];
         saveVip(data);
-
         return sock.sendMessage(from, { text: `🗑️ VIP eliminado: *${num}*` }, { quoted: msg });
       }
 
-      return sock.sendMessage(
-        from,
-        { text: "⚠️ Subcomando inválido. Usa: *.vip* / *.vip add* / *.vip del* / *.vip list* / *.vip check*" },
-        { quoted: msg }
-      );
+      return sock.sendMessage(from, { text: "⚠️ Subcomando inválido. Usa *.vip*" }, { quoted: msg });
     } catch (e) {
       console.error("[VIP] Error:", e);
       return sock.sendMessage(from, { text: "❌ Error en VIP. Revisa consola." }, { quoted: msg });
     }
   },
 };
-
