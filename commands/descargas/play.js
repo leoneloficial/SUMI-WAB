@@ -140,7 +140,7 @@ function getQuotedMessageId(msg) {
 export default {
   name: "play",
   command: ["play"],
-  category: "music",
+  category: "descarga",
 
   run: async ({ sock, msg, from, args = [], comandos }) => {
     try {
