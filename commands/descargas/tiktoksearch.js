@@ -1,4 +1,9 @@
 import axios from "axios";
+import {
+  generateWAMessageFromContent,
+  prepareWAMessageMedia,
+  proto
+} from "@whiskeysockets/baileys";
 
 // ================= CONFIG =================
 const API_URL = "https://nexevo-api.vercel.app/search/tiktok";
@@ -14,11 +19,76 @@ function shuffle(arr) {
   return a;
 }
 
-// ================= COMANDO =================
+// arma un “media group” en un solo envío (best-effort)
+async function sendAsAlbum(sock, jid, videos, caption, quoted) {
+  // Prepara cada video como “prepared media”
+  const prepared = [];
+  for (let i = 0; i < videos.length; i++) {
+    const v = videos[i];
+    const media = await prepareWAMessageMedia(
+      { video: v.buffer, mimetype: "video/mp4" },
+      { upload: sock.waUploadToServer }
+    );
+
+    prepared.push({
+      videoMessage: media.videoMessage,
+      // WhatsApp normalmente solo usa caption en el primero del grupo
+      messageContextInfo: { messageSecret: new Uint8Array(32) },
+      ...(i === 0 ? { caption } : {})
+    });
+  }
+
+  // Construye el contenido tipo “album”
+  const content = proto.Message.fromObject({
+    viewOnceMessage: {
+      message: {
+        // Esto es lo que usualmente fuerza agrupación de medios
+        messageContextInfo: {
+          messageSecret: new Uint8Array(32)
+        },
+        // Se envía como “videoMessage” en grupo mediante array interno
+        // Algunos clientes lo interpretan como álbum/grupo
+        videoMessage: prepared[0].videoMessage
+      }
+    }
+  });
+
+  // Truco: meter el resto como “additional messages” no funciona siempre,
+  // así que usamos un enfoque de “multi-send” en 1 relay (si lo permite)
+  // En Baileys, lo más compatible es construir un msg de contenido y luego relay
+  const msg = generateWAMessageFromContent(jid, content, quoted ? quoted : {});
+
+  // Adjunta el resto como “multi” dentro de message context
+  // (best-effort: dependiendo del cliente, puede agrupar o no)
+  msg.message.viewOnceMessage.message.messageContextInfo = {
+    messageSecret: new Uint8Array(32),
+    // “forwardedNewsletterMessageInfo” a veces ya lo tienes en global.channelInfo,
+    // pero aquí no rompe si existe
+    ...(global.channelInfo?.messageContextInfo || {})
+  };
+
+  await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+
+  // Después del primer “ancla”, manda los demás con mismo quoted pero SIN spam textual
+  // intentando que WhatsApp los agrupe por tiempo/consecutivo.
+  for (let i = 1; i < prepared.length; i++) {
+    await sock.sendMessage(
+      jid,
+      {
+        video: prepared[i].videoMessage,
+        mimetype: "video/mp4",
+        // sin caption para no spam
+        ...global.channelInfo
+      },
+      quoted
+    );
+  }
+}
+
 export default {
   command: ["tiktoksearch"],
   category: "descarga",
-  description: "Busca y envía videos de TikTok por texto (envía 4)",
+  description: "Busca y envía 4 videos de TikTok (intenta en álbum)",
 
   run: async ({ sock, from, args, settings, m, msg }) => {
     const quoted = (m?.key || msg?.key) ? { quoted: (m || msg) } : undefined;
@@ -42,7 +112,6 @@ export default {
         );
       }
 
-      // ⏳ aviso
       await sock.sendMessage(
         from,
         {
@@ -56,7 +125,6 @@ export default {
         quoted
       );
 
-      // 🌐 llamada API
       const { data } = await axios.get(
         `${API_URL}?q=${encodeURIComponent(query)}`,
         { timeout: 20000 }
@@ -65,15 +133,11 @@ export default {
       if (!data?.status || !Array.isArray(data.result) || data.result.length === 0) {
         return sock.sendMessage(
           from,
-          {
-            text: "❌ *No se encontraron resultados*",
-            ...global.channelInfo
-          },
+          { text: "❌ *No se encontraron resultados*", ...global.channelInfo },
           quoted
         );
       }
 
-      // ✅ escoger hasta 4 resultados (barajados) y únicos por URL
       const shuffled = shuffle(data.result);
       const picked = [];
       const seen = new Set();
@@ -86,88 +150,65 @@ export default {
         if (picked.length >= MAX_VIDEOS) break;
       }
 
-      if (picked.length === 0) {
+      if (!picked.length) {
         return sock.sendMessage(
           from,
-          {
-            text: "❌ *No se pudieron seleccionar resultados válidos*",
-            ...global.channelInfo
-          },
+          { text: "❌ *No se pudieron seleccionar resultados válidos*", ...global.channelInfo },
           quoted
         );
       }
 
-      // 🧾 header
       await sock.sendMessage(
         from,
-        {
-          text: `✅ Encontré *${picked.length}* videos. Enviando...`,
-          ...global.channelInfo
-        },
+        { text: `✅ Encontré *${picked.length}* videos. Enviando en grupo...`, ...global.channelInfo },
         quoted
       );
 
-      // 🎬 enviar videos (uno por uno, estable)
-      let failed = 0;
+      // Descarga buffers primero
+      const buffers = [];
+      for (const video of picked) {
+        const r = await axios.get(video.play, {
+          responseType: "arraybuffer",
+          timeout: 60000,
+          headers: { "User-Agent": "Mozilla/5.0" }
+        });
+        buffers.push({
+          buffer: Buffer.from(r.data),
+          meta: video
+        });
+      }
 
-      for (let i = 0; i < picked.length; i++) {
-        const video = picked[i];
+      const caption =
+`🎬 *TikTok (x${buffers.length})*
+🔎 "${query}"
+🤖 _${botName}_`;
 
-        try {
-          const videoRes = await axios.get(video.play, {
-            responseType: "arraybuffer",
-            timeout: 60000,
-            headers: { "User-Agent": "Mozilla/5.0" }
-          });
+      // ✅ intenta “álbum”
+      try {
+        await sendAsAlbum(sock, from, buffers, caption, quoted);
+      } catch (e) {
+        console.error("ALBUM FALLBACK:", e?.message || e);
 
-          const videoBuffer = Buffer.from(videoRes.data);
-
+        // fallback: manda normal pero sin textos extra
+        for (let i = 0; i < buffers.length; i++) {
           await sock.sendMessage(
             from,
             {
-              video: videoBuffer,
+              video: buffers[i].buffer,
               mimetype: "video/mp4",
-              caption:
-`🎬 *Resultado TikTok* (${i + 1}/${picked.length})
-
-📝 *Título:*
-_${video.title || "Sin título"}_
-
-👤 *Autor:* ${video.author?.nickname || "Desconocido"}
-⏱️ *Duración:* ${video.duration ?? "?"}s
-▶️ *Vistas:* ${video.play_count ?? "?"}
-
-🤖 _${botName}_`,
+              caption: i === 0 ? caption : undefined,
               ...global.channelInfo
             },
             quoted
           );
-
-        } catch (e) {
-          failed++;
-          console.error("TIKTOK VIDEO ERROR:", e?.message || e);
         }
-      }
-
-      if (failed > 0) {
-        await sock.sendMessage(
-          from,
-          {
-            text: `⚠️ Se enviaron ${picked.length - failed}/${picked.length}. (${failed} fallaron por descarga/peso).`,
-            ...global.channelInfo
-          },
-          quoted
-        );
       }
 
     } catch (err) {
       console.error("TIKTOK SEARCH ERROR:", err?.message || err);
       await sock.sendMessage(
         from,
-        {
-          text: "❌ *Error al buscar en TikTok*",
-          ...global.channelInfo
-        },
+        { text: "❌ *Error al buscar en TikTok*", ...global.channelInfo },
         quoted
       );
     }
