@@ -151,6 +151,7 @@ export default {
     if (!esGrupo) return;
     if (!gruposActivos.has(from)) return;
 
+    // No castigar admins/owner
     if (esAdmin || esOwner) return;
 
     const sender = msg.key.participant;
@@ -168,20 +169,38 @@ export default {
     const bad = findBadWord(normalized, words);
     if (!bad) return;
 
+    // borrar el mensaje (si se puede)
     try {
       await sock.sendMessage(from, { delete: msg.key, ...global.channelInfo });
     } catch {}
 
+    // sumar warn (persistente)
     const warns = loadWarns();
     if (!warns[from]) warns[from] = {};
-    const current = Number(warns[from][sender] || 0) + 1;
+
+    const prev = Number(warns[from][sender] || 0);
+    const current = prev + 1;
+
     warns[from][sender] = current;
     saveWarns(warns);
 
+    // Si llega a 3, intenta expulsar
     if (current >= MAX_WARNS) {
+      let kicked = false;
+
       try {
         await sock.groupParticipantsUpdate(from, [sender], "remove");
-        await sock.sendMessage(from, {
+        kicked = true;
+      } catch {
+        kicked = false;
+      }
+
+      if (kicked) {
+        // Solo si expulsó, resetea a 0
+        warns[from][sender] = 0;
+        saveWarns(warns);
+
+        return sock.sendMessage(from, {
           text:
             `🚫 *ANTI +18*\n` +
             `@${sender.split("@")[0]} llegó a *${current}/${MAX_WARNS}* advertencias.\n` +
@@ -189,23 +208,22 @@ export default {
           mentions: [sender],
           ...global.channelInfo
         });
-      } catch {
-        await sock.sendMessage(from, {
+      } else {
+        // NO reseteamos: se queda en 3 para que sea kick directo la próxima
+        return sock.sendMessage(from, {
           text:
             `🚫 *ANTI +18*\n` +
             `@${sender.split("@")[0]} llegó a *${current}/${MAX_WARNS}* advertencias.\n` +
-            `⚠️ No pude expulsar (¿bot sin admin?).`,
+            `⚠️ No pude expulsar (¿bot sin admin?).\n` +
+            `📌 El usuario queda marcado en *${MAX_WARNS}/${MAX_WARNS}* y al próximo mensaje se intentará expulsar de nuevo.`,
           mentions: [sender],
           ...global.channelInfo
         });
       }
-
-      warns[from][sender] = 0;
-      saveWarns(warns);
-      return;
     }
 
-    await sock.sendMessage(from, {
+    // Advertencia normal 1/3 o 2/3
+    return sock.sendMessage(from, {
       text:
         `⚠️ *ANTI +18*\n` +
         `@${sender.split("@")[0]} contenido no permitido.\n` +
