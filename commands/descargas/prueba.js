@@ -1,3 +1,6 @@
+
+import fs from "fs";
+import path from "path";
 import axios from "axios";
 import yts from "yt-search";
 import { spawn } from "child_process";
@@ -8,6 +11,19 @@ const cooldowns = new Map();
 
 const MAX_BYTES = 150 * 1024 * 1024; // 150MB
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const TMP_DIR = path.join(process.cwd(), "tmp");
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+// si existe /dev/shm (RAM), úsalo para evitar ENOSPC por disco
+const RAM_TMP = "/dev/shm";
+const CAN_USE_RAM = (() => {
+  try {
+    return fs.existsSync(RAM_TMP) && fs.statSync(RAM_TMP).isDirectory();
+  } catch {
+    return false;
+  }
+})();
 
 function safeFileName(name) {
   return String(name || "video")
@@ -32,63 +48,42 @@ async function headSize(url) {
   }
 }
 
-/**
- * ffmpeg lee desde URL y escribe MP4 a stdout.
- * Nosotros juntamos stdout en Buffer con límite MAX_BYTES.
- */
-async function ffmpegToBuffer({ inputUrl, maxBytes }) {
-  return await new Promise((resolve, reject) => {
-    const ff = spawn(
-      "ffmpeg",
-      [
-        "-loglevel", "error",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-i", inputUrl,
-        "-map", "0:v",
-        "-map", "0:a?",
-        "-movflags", "+faststart",
-        "-c", "copy",
-        "-f", "mp4",
-        "pipe:1",
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+async function remuxFromUrlToMp4({ inputUrl, outPath }) {
+  // ffmpeg leyendo directo desde URL (permite seek via HTTP range)
+  const args = [
+    "-y",
+    "-loglevel", "error",
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
+    "-i", inputUrl,
+    "-map", "0:v",
+    "-map", "0:a?",
+    "-movflags", "+faststart",
+    "-c", "copy",
+    outPath,
+  ];
 
-    let errText = "";
-    ff.stderr.on("data", (d) => (errText += d.toString()));
+  const ff = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
 
-    const chunks = [];
-    let total = 0;
+  let ffErr = "";
+  ff.stderr.on("data", (d) => (ffErr += d.toString()));
 
-    ff.stdout.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        // cortar
-        try { ff.kill("SIGKILL"); } catch {}
-        return reject(new Error("SIZE_LIMIT"));
-      }
-      chunks.push(chunk);
-    });
-
-    ff.on("error", (e) => reject(e));
-
+  await new Promise((resolve, reject) => {
     ff.on("close", (code) => {
-      if (code !== 0) {
-        return reject(new Error(errText || `ffmpeg failed (code ${code})`));
-      }
-      const buf = Buffer.concat(chunks, total);
-      if (!buf.length || buf.length < 300000) {
-        return reject(new Error("BUFFER_INCOMPLETE"));
-      }
-      resolve(buf);
+      if (code === 0) return resolve();
+      reject(new Error(ffErr || `ffmpeg failed (code ${code})`));
     });
+    ff.on("error", reject);
   });
+
+  const size = fs.existsSync(outPath) ? fs.statSync(outPath).size : 0;
+  if (!size || size < 300000) throw new Error("Salida MP4 incompleta");
+  return size;
 }
 
 export default {
-  command: ["ytmp4s", "ytstream", "ytmp4stream"],
+  command: ["ytmp4", "mp4", "ytvideo", "playvideo"],
   category: "descarga",
 
   run: async (ctx) => {
@@ -110,15 +105,17 @@ export default {
     }
     cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
 
+    let finalMp4 = null;
+
     try {
       if (!args?.length) {
         cooldowns.delete(userId);
-        return reply("❌ Uso: .ytmp4s <nombre o link de YouTube>");
+        return reply("❌ Uso: .ytmp4 <nombre o link de YouTube>");
       }
 
       const query = args.join(" ").trim();
 
-      // 1) Resolver URL YT (si no es link, buscar)
+      // 1) Resolver YouTube URL
       let ytUrl = query;
       let title = "YouTube Video";
 
@@ -128,70 +125,84 @@ export default {
           cooldowns.delete(userId);
           return reply("❌ No se encontró el video");
         }
-
         const v = search.videos[0];
         ytUrl = v.url;
         title = safeFileName(v.title);
       }
 
-      await reply(`🎬 *VIDEO STREAM*\n📹 ${title}\n⏳ Pidiendo link…`);
+      await reply(`🎬 *VIDEO*\n📹 ${title}\n⏳ Pidiendo link…`);
 
-      // 2) Nexevo → link MP4
+      // 2) Nexevo => mp4 directo
       const api = `${API_URL}?url=${encodeURIComponent(ytUrl)}`;
       const { data } = await axios.get(api, { timeout: 20000 });
 
       if (!data?.status || !data?.result?.url) throw new Error("API inválida");
       const mp4Remote = data.result.url;
 
-      // 3) Si el host da tamaño, validar
+      // 3) Si hay tamaño, validar 150MB
       const remoteSize = await headSize(mp4Remote);
       if (remoteSize && remoteSize > MAX_BYTES) {
         cooldowns.delete(userId);
         return reply(`❌ El video pesa ${(remoteSize / 1048576).toFixed(1)} MB y supera 150 MB.`);
       }
 
-      await reply(`⏳ Remux por streaming (sin disco)…\n📦 Límite: 150 MB`);
+      await reply(`⏳ Descargando (stream) + optimizando (faststart)…\n📦 Límite: 150 MB`);
 
-      // 4) Reintentos streaming
-      let videoBuffer = null;
+      // 4) Solo 1 archivo final (RAM si hay /dev/shm, si no disco)
+      const baseDir = CAN_USE_RAM ? RAM_TMP : TMP_DIR;
+      finalMp4 = path.join(baseDir, `${Date.now()}_${title}.mp4`);
+
+      // 5) Reintentos
+      let ok = false;
       let lastErr = null;
 
       for (let i = 0; i < 2; i++) {
         try {
-          videoBuffer = await ffmpegToBuffer({ inputUrl: mp4Remote, maxBytes: MAX_BYTES });
+          await remuxFromUrlToMp4({ inputUrl: mp4Remote, outPath: finalMp4 });
+
+          const localSize = fs.statSync(finalMp4).size;
+          if (localSize > MAX_BYTES) throw new Error("Archivo final supera 150MB");
+
+          ok = true;
           break;
         } catch (e) {
           lastErr = e;
+          try { if (finalMp4 && fs.existsSync(finalMp4)) fs.unlinkSync(finalMp4); } catch {}
           await sleep(1200);
         }
       }
 
-      if (!videoBuffer) throw lastErr || new Error("Fallo streaming");
+      if (!ok) throw lastErr || new Error("Fallo ffmpeg");
 
-      // 5) Enviar (Baileys sube el buffer)
+      // 6) Enviar SIN RAM
+      const localSize = fs.statSync(finalMp4).size;
       await sock.sendMessage(
         from,
         {
-          video: videoBuffer,
+          video: { url: finalMp4 },
           mimetype: "video/mp4",
           fileName: `${title}.mp4`,
-          caption: `🎬 ${title}\n📦 ${(videoBuffer.length / 1048576).toFixed(1)} MB`,
+          caption: `🎬 ${title}\n📦 ${(localSize / 1048576).toFixed(1)} MB`,
           ...global.channelInfo,
         },
         msg ? { quoted: msg } : undefined
       );
 
     } catch (err) {
-      console.error("YTMP4 STREAM-BUFFER ERROR:", err?.message || err);
-      cooldowns.delete(from);
+      console.error("YTMP4 STREAM-FINAL ERROR:", err?.message || err);
 
-      if (String(err?.message) === "SIZE_LIMIT") {
-        return reply("❌ Se canceló: el video excede 150 MB.");
+      if (String(err?.code) === "ENOSPC" || /no space/i.test(String(err?.message))) {
+        return reply("❌ Sin espacio en el servidor (/ o /tmp). Limpia tmp/ o baja el límite.");
       }
 
-      await reply("❌ Error al procesar el video (100% streaming).");
+      if (/supera 150/i.test(String(err?.message))) {
+        return reply("❌ El archivo final supera 150 MB. Prueba menor calidad o video más corto.");
+      }
+
+      await reply("❌ Error al procesar el video (stream+ffmpeg).");
     } finally {
-      cooldowns.delete(from);
+      cooldowns.delete(userId);
+      try { if (finalMp4 && fs.existsSync(finalMp4)) fs.unlinkSync(finalMp4); } catch {}
     }
   },
 };
