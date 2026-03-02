@@ -1,78 +1,71 @@
 import axios from "axios";
 
-const API_URL = "https://nexevo.onrender.com/search/tiktok";
-
 export default {
-  command: ["ttsearch", "ttk"],
-  category: "descarga",
+  name: "tiktoksearch",
+  command: ["ttsearch", "tiktoksearch", "tks", "tsearch"],
+  category: "descargas",
+  desc: "Busca videos en TikTok. Uso: .ttsearch <texto>",
 
-  run: async (ctx) => {
-    const { sock, from, args } = ctx;
-    const msg = ctx.m || ctx.msg || null;
-    const quoted = msg?.key ? { quoted: msg } : undefined;
+  run: async ({ sock, msg, from, args, settings }) => {
+    const q = args.join(" ").trim();
+    if (!q) {
+      return sock.sendMessage(
+        from,
+        { text: `❌ Uso:\n${settings.prefix}ttsearch <texto>\nEj: ${settings.prefix}ttsearch edit goku`, ...global.channelInfo },
+        { quoted: msg }
+      );
+    }
 
     try {
-      if (!args?.length) {
-        return sock.sendMessage(from, {
-          text: "❌ Uso: .tiktok <búsqueda>",
-          ...global.channelInfo,
-        });
+      const url = `https://nexevo.onrender.com/search/tiktok?q=${encodeURIComponent(q)}`;
+      const { data } = await axios.get(url, { timeout: 60000 });
+
+      if (!data?.status || !Array.isArray(data?.result) || data.result.length === 0) {
+        return sock.sendMessage(
+          from,
+          { text: "❌ No encontré resultados.", ...global.channelInfo },
+          { quoted: msg }
+        );
       }
 
-      const query = args.join(" ").trim();
+      const results = data.result.slice(0, 5);
 
-      const { data } = await axios.get(API_URL, {
-        params: { q: query },
-        timeout: 20000,
+      let text = `🔎 *TikTok Search*\n📌 *Query:* ${q}\n\n`;
+
+      results.forEach((v, i) => {
+        const title = (v.title || "Sin título").trim();
+        const dur = typeof v.duration === "number" ? `${v.duration}s` : "—";
+        const views = v.play_count ? `${v.play_count}` : "—";
+        const author = v?.author?.unique_id ? `@${v.author.unique_id}` : "—";
+
+        text +=
+          `*${i + 1}.* ${title}\n` +
+          `👤 ${author} | ⏱ ${dur} | 👁 ${views}\n` +
+          `▶️ *Sin marca:* ${v.play}\n` +
+          `💧 *Con marca:* ${v.wmplay}\n\n`;
       });
 
-      if (!data?.status || !data?.result?.length) {
-        return sock.sendMessage(from, {
-          text: "❌ No se encontraron resultados.",
-          ...global.channelInfo,
-        });
+      text += `✅ Tip: copia el link "Sin marca" para verlo/descargarlo en tu navegador.\n`;
+
+      // Enviar solo texto (y opcional: miniatura del primer resultado)
+      const firstCover = results[0]?.cover;
+
+      if (firstCover) {
+        return sock.sendMessage(
+          from,
+          { image: { url: firstCover }, caption: text, ...global.channelInfo },
+          { quoted: msg }
+        );
       }
 
-      const video = data.result[0];
-
-      const caption =
-`🎵 *${video.title || "Sin título"}*
-
-👤 Autor: ${video.author?.nickname || "Desconocido"}
-⏱ Duración: ${video.duration}s
-❤️ Likes: ${video.digg_count}
-💬 Comentarios: ${video.comment_count}
-🔗 Región: ${video.region}`;
-
-      // Enviar portada
-      await sock.sendMessage(
+      return sock.sendMessage(from, { text, ...global.channelInfo }, { quoted: msg });
+    } catch (e) {
+      console.error("tiktoksearch error:", e?.message || e);
+      return sock.sendMessage(
         from,
-        {
-          image: { url: video.cover },
-          caption,
-          ...global.channelInfo,
-        },
-        quoted
+        { text: "❌ Error consultando la API de TikTok.", ...global.channelInfo },
+        { quoted: msg }
       );
-
-      // Enviar video sin marca de agua
-      await sock.sendMessage(
-        from,
-        {
-          video: { url: video.play },
-          caption: "🎬 Aquí tienes tu video",
-          ...global.channelInfo,
-        },
-        quoted
-      );
-
-    } catch (err) {
-      console.error("TIKTOK SEARCH ERROR:", err?.message || err);
-
-      await sock.sendMessage(from, {
-        text: "❌ Error al buscar en TikTok.",
-        ...global.channelInfo,
-      });
     }
   },
 };
