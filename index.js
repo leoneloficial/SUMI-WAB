@@ -27,6 +27,8 @@ import fs from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
 
+// ================= CONFIG =================
+
 const CARPETA_AUTH = "dvyer-session"
 const logger = pino({ level: "silent" })
 
@@ -36,6 +38,24 @@ fs.readFileSync("./settings/settings.json","utf-8")
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+// ================= INFO CHANNEL =================
+
+global.channelInfo = settings?.newsletter?.enabled
+? {
+contextInfo:{
+forwardingScore:999,
+isForwarded:true,
+forwardedNewsletterMessageInfo:{
+newsletterJid:settings.newsletter.jid,
+newsletterName:settings.newsletter.name,
+serverMessageId:-1
+}
+}
+}
+: {}
+
+// ================= TMP DIR =================
 
 const TMP_DIR = path.join(process.cwd(),"tmp")
 
@@ -49,9 +69,10 @@ process.env.TMPDIR = TMP_DIR
 process.env.TMP = TMP_DIR
 process.env.TEMP = TMP_DIR
 
+// ================= VARIABLES =================
+
 let sockGlobal = null
 let conectando = false
-let inicializado = false
 
 let rl = readline.createInterface({
 input:process.stdin,
@@ -70,7 +91,7 @@ Grupo:0,
 Privado:0
 }
 
-let ultimosMensajes = []
+// ================= CONSOLA =================
 
 global.consoleBuffer = []
 global.MAX_CONSOLE_LINES = 120
@@ -102,12 +123,12 @@ const warn = console.warn
 
 console.log=(...a)=>{
 pushConsole("LOG",a)
-log(...a)
+log(chalk.cyan("[LOG]"),...a)
 }
 
 console.warn=(...a)=>{
 pushConsole("WARN",a)
-warn(...a)
+warn(chalk.yellow("[WARN]"),...a)
 }
 
 console.error=(...a)=>{
@@ -122,9 +143,11 @@ return
 }
 
 pushConsole("ERROR",a)
-error(...a)
+error(chalk.red("[ERROR]"),...a)
 
 }
+
+// ================= ANTI CRASH =================
 
 process.on("unhandledRejection",(reason)=>{
 
@@ -142,15 +165,7 @@ console.error(err)
 
 })
 
-function normalizarNumero(jid){
-
-return String(jid||"")
-.split("@")[0]
-.split(":")[0]
-.replace(/[^\d]/g,"")
-.trim()
-
-}
+// ================= UTIL =================
 
 function tipoChat(jid){
 
@@ -174,6 +189,32 @@ null
 )
 
 }
+
+// ================= BANNER =================
+
+function banner(){
+
+console.clear()
+
+console.log(
+chalk.magentaBright(`
+╔══════════════════════════════╗
+║        DVYER BOT v2          ║
+╚══════════════════════════════╝
+`)
+)
+
+console.log(
+chalk.green("Owner :"),settings.ownerName,
+chalk.blue("\nPrefijo :"),settings.prefix,
+chalk.yellow("\nComandos cargados :"),comandos.size
+)
+
+console.log(chalk.gray("──────────────────────────────"))
+
+}
+
+// ================= CARGAR COMANDOS =================
 
 async function cargarComandos(){
 
@@ -212,9 +253,7 @@ else nombres.push(cmd.command)
 }
 
 for(const n of nombres){
-
 comandos.set(String(n).toLowerCase(),cmd)
-
 }
 
 console.log("✓ Comando cargado:",nombres.join(","))
@@ -233,12 +272,16 @@ await leer(base)
 
 }
 
+// ================= BOT =================
+
 async function iniciarBot(){
 
 if(conectando) return
 conectando = true
 
 try{
+
+banner()
 
 const {state,saveCreds} = await useMultiFileAuthState(CARPETA_AUTH)
 const {version} = await fetchLatestBaileysVersion()
@@ -266,8 +309,8 @@ const numero = await preguntar("Numero: ")
 
 const codigo = await sock.requestPairingCode(numero.trim())
 
-console.log("\nCODIGO:\n")
-console.log(codigo)
+console.log("\nCODIGO DE VINCULACION:\n")
+console.log(chalk.greenBright(codigo))
 
 }
 
@@ -277,7 +320,7 @@ sock.ev.on("connection.update",({connection,lastDisconnect})=>{
 
 if(connection==="open"){
 
-console.log("✅ DVYER BOT CONECTADO")
+console.log(chalk.green("✅ DVYER BOT CONECTADO"))
 
 }
 
@@ -302,6 +345,8 @@ iniciarBot()
 }
 
 })
+
+// ================= MENSAJES =================
 
 sock.ev.on("messages.upsert",async({messages})=>{
 
@@ -372,7 +417,6 @@ conectando=false
 async function start(){
 
 await cargarComandos()
-
 await iniciarBot()
 
 }
