@@ -6,8 +6,7 @@ const API_VIDEO_URL = `${API_BASE}/ytmp4`;
 const API_SEARCH_URL = `${API_BASE}/ytsearch`;
 
 const COOLDOWN_TIME = 15 * 1000;
-const DEFAULT_QUALITY = "360p";
-const FALLBACK_QUALITIES = ["360p", "240p", "144p", "480p", "720p"];
+const VIDEO_QUALITY = "360p";
 const cooldowns = new Map();
 
 function safeFileName(name) {
@@ -22,15 +21,6 @@ function safeFileName(name) {
 
 function isHttpUrl(s) {
   return /^https?:\/\//i.test(String(s || ""));
-}
-
-function parseQuality(args) {
-  const q = args.find((a) => /^\d{3,4}p$/i.test(a));
-  return (q || DEFAULT_QUALITY).toLowerCase();
-}
-
-function withoutQuality(args) {
-  return args.filter((a) => !/^\d{3,4}p$/i.test(a));
 }
 
 function getCooldownRemaining(untilMs) {
@@ -158,39 +148,30 @@ async function resolveVideoInfo(queryOrUrl) {
   };
 }
 
-async function requestVideoLink(videoUrl, requestedQuality) {
-  const qualities = [requestedQuality, ...FALLBACK_QUALITIES]
-    .filter(Boolean)
-    .map((q) => String(q).toLowerCase())
-    .filter((q, i, arr) => arr.indexOf(q) === i);
-
+async function requestVideoLink(videoUrl) {
   let lastError = "No se pudo obtener el video.";
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    for (const quality of qualities) {
-      try {
-        const data = await apiGet(API_VIDEO_URL, {
-          mode: "link",
-          quality,
-          url: videoUrl,
-        });
+    try {
+      const data = await apiGet(API_VIDEO_URL, {
+        mode: "link",
+        quality: VIDEO_QUALITY,
+        url: videoUrl,
+      });
 
-        const directUrl = toAbsoluteUrl(pickBestDownloadUrl(data));
-        if (!directUrl) {
-          throw new Error("La API no devolvió URL de descarga.");
-        }
-
-        return {
-          title: pickTitle(data, "video"),
-          directUrl,
-          quality,
-        };
-      } catch (error) {
-        lastError = error?.message || "Error desconocido";
+      const directUrl = toAbsoluteUrl(pickBestDownloadUrl(data));
+      if (!directUrl) {
+        throw new Error("La API no devolvió URL de descarga.");
       }
-    }
 
-    await sleep(1200 * attempt);
+      return {
+        title: pickTitle(data, "video"),
+        directUrl,
+      };
+    } catch (error) {
+      lastError = error?.message || "Error desconocido";
+      await sleep(1200 * attempt);
+    }
   }
 
   throw new Error(lastError);
@@ -251,13 +232,12 @@ export default {
       if (!args?.length) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .ytmp4 (360p) <nombre o link>",
+          text: "❌ Uso: .ytmp4 <nombre o link>",
           ...global.channelInfo,
         });
       }
 
-      const requestedQuality = parseQuality(args);
-      const query = withoutQuality(args).join(" ").trim();
+      const query = args.join(" ").trim();
 
       if (!query) {
         cooldowns.delete(userId);
@@ -284,17 +264,17 @@ export default {
         thumbnail
           ? {
               image: { url: thumbnail },
-              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${requestedQuality}`,
+              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
               ...global.channelInfo,
             }
           : {
-              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${requestedQuality}`,
+              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
               ...global.channelInfo,
             },
         quoted
       );
 
-      const info = await requestVideoLink(videoUrl, requestedQuality);
+      const info = await requestVideoLink(videoUrl);
       title = safeFileName(info.title || title);
 
       await sendVideoByUrl(sock, from, quoted, {
