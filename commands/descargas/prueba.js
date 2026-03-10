@@ -11,7 +11,7 @@ function safeFileName(name){
 }
 
 export default {
-  command:["mp5"],
+  command:["play2"],
   category:"descarga",
 
   run: async (ctx)=>{
@@ -27,6 +27,7 @@ export default {
 
     try {
 
+      // 🔎 Buscar video en YouTube
       const query = args.join(" ")
       const search = await yts(query)
       const video = search.videos[0]
@@ -38,36 +39,49 @@ export default {
         })
       }
 
+      // 📩 mensaje inicial
       await sock.sendMessage(from,{
         image:{url:video.thumbnail},
         caption:`🎵 *${video.title}*\n⏱️ ${video.timestamp}\n\n⬇️ Descargando audio...`,
         ...channelInfo
-      }, {quoted: msg})
+      },{quoted: msg})
 
-      // NUEVA API
+      // 🌐 llamar API
       const {data} = await axios.get(`${API}${encodeURIComponent(video.url)}`)
 
-      if(!data?.status || !data?.result?.direct_url){
+      if(!data?.status || !data?.result){
+        throw new Error("API no devolvió datos")
+      }
+
+      // 🔁 fallback de enlaces
+      const audioUrl =
+        data.result.direct_url ||
+        data.result.url ||
+        data.result.download_url_full
+
+      if(!audioUrl){
         throw new Error("API no devolvió audio")
       }
 
-      const audioUrl = data.result.direct_url
-      const fileName = safeFileName(video.title)+".m4a"
+      const fileName = safeFileName(video.title) + ".m4a"
 
+      // 🎧 enviar audio
       await sock.sendMessage(from,{
-        audio:{ url: audioUrl },
+        audio:{url:audioUrl},
         mimetype:"audio/mp4",
         fileName,
         ...channelInfo
-      }, {quoted: msg})
+      },{quoted: msg})
 
     } catch(err){
+
       console.log("[PLAY ERROR]", err)
 
       await sock.sendMessage(from,{
-        text:"❌ Error descargando música",
+        text:"❌ Error descargando música\nIntenta otra canción",
         ...channelInfo
-      })
+      },{quoted: msg})
+
     }
   }
 }
