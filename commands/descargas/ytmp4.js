@@ -22,6 +22,14 @@ function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value || ""));
 }
 
+function toAbsoluteApiUrl(value) {
+  const url = String(value || "").trim();
+  if (!url) return "";
+  if (isHttpUrl(url)) return url;
+  if (url.startsWith("/")) return `${API_BASE}${url}`;
+  return `${API_BASE}/${url}`;
+}
+
 function getCooldownRemaining(untilMs) {
   return Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
 }
@@ -39,11 +47,15 @@ function extractApiError(data, status) {
   );
 }
 
-function pickDownloadUrl(data) {
+function pickMediaUrl(data) {
   return (
+    data?.stream_url_full ||
+    data?.stream_url ||
     data?.download_url_full ||
     data?.download_url ||
     data?.url ||
+    data?.result?.stream_url_full ||
+    data?.result?.stream_url ||
     data?.result?.download_url_full ||
     data?.result?.download_url ||
     data?.result?.url ||
@@ -90,24 +102,30 @@ async function resolveRedirectTarget(url) {
   let lastError = "No se pudo resolver la redirección final.";
 
   for (let attempt = 1; attempt <= 3; attempt++) {
+    let response;
     try {
-      const response = await axios.get(url, {
+      response = await axios.get(url, {
         timeout: 35000,
         maxRedirects: 0,
+        responseType: "stream",
         validateStatus: () => true,
       });
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers?.location;
+        if (response.data?.destroy) response.data.destroy();
         if (location) return location;
       }
 
       if (response.status >= 200 && response.status < 300) {
+        if (response.data?.destroy) response.data.destroy();
         return url;
       }
 
+      if (response.data?.destroy) response.data.destroy();
       lastError = extractApiError(response.data, response.status);
     } catch (error) {
+      if (response?.data?.destroy) response.data.destroy();
       lastError = error?.message || "redirect failed";
     }
 
@@ -128,12 +146,18 @@ async function requestVideoLink(videoUrl) {
         url: videoUrl,
       });
 
-      const redirectUrl = pickDownloadUrl(data);
-      if (!redirectUrl) {
-        throw new Error("La API no devolvió download_url.");
+      const rawUrl = pickMediaUrl(data);
+      const mediaUrl = toAbsoluteApiUrl(rawUrl);
+
+      if (!mediaUrl) {
+        throw new Error("La API no devolvió stream_url/download_url.");
       }
 
-      const directUrl = await resolveRedirectTarget(redirectUrl);
+      let directUrl = mediaUrl;
+
+      if (/\/download\/redirect\//i.test(mediaUrl)) {
+        directUrl = await resolveRedirectTarget(mediaUrl);
+      }
 
       return {
         title: safeFileName(data?.title || data?.result?.title || "video"),
@@ -253,4 +277,5 @@ export default {
     }
   },
 };
+
 
