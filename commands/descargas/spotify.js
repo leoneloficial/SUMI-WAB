@@ -477,7 +477,7 @@ export default {
         deleteFileSafe(tempPath);
         tempPath = null;
 
-        console.warn("SPOTIFY fallback:", primaryError?.message || primaryError);
+        console.log("SPOTIFY fallback:", primaryError?.message || primaryError);
 
         await sock.sendMessage(
           from,
