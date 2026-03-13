@@ -9,7 +9,7 @@ import {
 
 export default {
   name: "subbot",
-  command: ["subbot", "subbotcode", "codesubbot"],
+  command: ["subbot","code", "subbotcode", "codesubbot"],
   category: "subbots",
   description: "Pide el codigo de vinculacion de un subbot",
 
