@@ -10,6 +10,15 @@ function normalizeNumber(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function normalizeTimestamp(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getSenderNumber(sender) {
+  return normalizeNumber(String(sender || "").split("@")[0].split(":")[0]);
+}
+
 function formatDateTime(value) {
   if (!value) return "Sin registro";
 
@@ -30,8 +39,18 @@ function formatDateTime(value) {
 
 function formatDuration(ms) {
   const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
-  const minutes = Math.floor(total / 60);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h ${minutes}m`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
 
   if (minutes > 0) {
     return `${minutes}m ${seconds}s`;
@@ -56,12 +75,25 @@ function getSubbotStateLabel(bot) {
   if (bot.connected) return "ACTIVO AHORA";
   if (bot.connecting) return "CONECTANDO";
   if (bot.registered) return "VINCULADO";
-  if (bot.pairingPending) return "ESPERANDO VINCULACION";
-  return "SIN VINCULAR";
+  if (bot.pairingPending) return "ESPERANDO CODIGO";
+  if (!bot.enabled) return "LIBRE";
+  return "RESERVADO";
 }
 
 function buildSubbotCard(bot) {
-  const numero = bot.hasConfiguredNumber ? bot.configuredNumber : "No configurado";
+  const requesterNumber = bot.requesterNumber || "Sin solicitante";
+  const linkedNumber = bot.configuredNumber || "No configurado";
+  const requestedAt = normalizeTimestamp(bot.requestedAt);
+  const releasedAt = normalizeTimestamp(bot.releasedAt);
+  const connectedFor = bot.connectedForMs
+    ? formatDuration(bot.connectedForMs)
+    : "No conectado";
+  const requestedFor = requestedAt
+    ? formatDateTime(requestedAt)
+    : "Sin solicitud";
+  const releasedText = releasedAt
+    ? formatDateTime(releasedAt)
+    : "Sin liberar aun";
   const horaActiva = bot.connectedAt ? formatDateTime(bot.connectedAt) : "No conectado";
   const ultimaSalida = bot.lastDisconnectAt
     ? formatDateTime(bot.lastDisconnectAt)
@@ -76,25 +108,116 @@ function buildSubbotCard(bot) {
   }
 
   return (
-    `• *${bot.label}* (${bot.displayName})\n` +
+    `*Slot ${bot.slot} - ${bot.label}*\n` +
     `Estado: ${getSubbotStateLabel(bot)}\n` +
-    `Numero: ${numero}\n` +
-    `Sesion: ${bot.authFolder}\n` +
-    `Hora activa: ${horaActiva}\n` +
-    `Ultimo cambio: ${ultimaSalida}${extra}`
+    `Bot: ${bot.displayName}\n` +
+    `Solicitante: ${requesterNumber}\n` +
+    `Numero vinculado: ${linkedNumber}\n` +
+    `Solicitado: ${requestedFor}\n` +
+    `Conectado desde: ${horaActiva}\n` +
+    `Tiempo conectado: ${connectedFor}\n` +
+    `Ultima salida: ${ultimaSalida}\n` +
+    `Liberado: ${releasedText}\n` +
+    `Sesion: ${bot.authFolder}${extra}`
   );
+}
+
+function parseSlotToken(value, maxSlots) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return null;
+
+  const directNumber = Number.parseInt(raw, 10);
+  if (String(directNumber) === raw && directNumber >= 1 && directNumber <= maxSlots) {
+    return directNumber;
+  }
+
+  const match = raw.match(/^(?:subbot|slot)(\d{1,2})$/);
+  if (!match) return null;
+
+  const parsed = Number.parseInt(match[1], 10);
+  if (parsed >= 1 && parsed <= maxSlots) {
+    return parsed;
+  }
+
+  return null;
+}
+
+function parseSubbotArgs(args = [], maxSlots = 15) {
+  const tokens = (Array.isArray(args) ? args : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  if (!tokens.length) {
+    return { action: "pair", slot: null, number: "" };
+  }
+
+  const first = tokens[0].toLowerCase();
+  const slot = parseSlotToken(tokens[0], maxSlots);
+  const onActions = ["on", "activar", "encender", "publico", "public"];
+  const offActions = ["off", "desactivar", "apagar", "cerrar", "close"];
+  const listActions = ["list", "lista", "status", "estado", "panel", "codigo", "codigos"];
+
+  if (onActions.includes(first)) {
+    return { action: "on", slot: null, number: "" };
+  }
+
+  if (offActions.includes(first)) {
+    return { action: "off", slot: null, number: "" };
+  }
+
+  if (listActions.includes(first)) {
+    return { action: "list", slot: null, number: "" };
+  }
+
+  if (slot) {
+    if (tokens.length === 1) {
+      return { action: "pair", slot, number: "" };
+    }
+
+    if (tokens.length === 2) {
+      const number = normalizeNumber(tokens[1]);
+      if (number) {
+        return { action: "pair", slot, number };
+      }
+    }
+
+    return { action: "invalid", slot: null, number: "" };
+  }
+
+  if (tokens.length === 1) {
+    const number = normalizeNumber(tokens[0]);
+    if (number) {
+      return { action: "pair", slot: null, number };
+    }
+  }
+
+  return { action: "invalid", slot: null, number: "" };
+}
+
+function commandDefaultsToList(commandName) {
+  const normalized = String(commandName || "").toLowerCase();
+  return ["subbots", "codigosubbots", "estadosubbots", "subbotsactivos"].includes(normalized);
 }
 
 export default {
   name: "subbot",
-  command: ["subbot", "subbotcode", "codesubbot", "subbots"],
-  category: "admin",
+  command: [
+    "subbot",
+    "subbotcode",
+    "codesubbot",
+    "subbots",
+    "codigosubbots",
+    "estadosubbots",
+    "subbotsactivos",
+  ],
+  category: "subbots",
   description: "Panel para pedir, activar y revisar subbots",
 
   run: async ({
     sock,
     msg,
     from,
+    sender,
     args = [],
     settings,
     esOwner,
@@ -106,14 +229,8 @@ export default {
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const prefix = getPrefix(settings);
     const runtime = global.botRuntime;
-    const rawArg = String(args[0] || "").trim();
-    const action = rawArg.toLowerCase();
-    const effectiveAction =
-      !rawArg && String(commandName || "").toLowerCase() === "subbots"
-        ? "list"
-        : action;
-    const requestedNumber = normalizeNumber(rawArg);
     const chatStatus = getCurrentChatStatus({ isGroup, botId, botLabel });
+    const senderNumber = getSenderNumber(sender);
 
     if (
       !runtime?.requestBotPairingCode ||
@@ -132,8 +249,12 @@ export default {
     }
 
     const subbotAccess = runtime.getSubbotRequestState();
+    const parsed = parseSubbotArgs(
+      !args.length && commandDefaultsToList(commandName) ? ["list"] : args,
+      Number(subbotAccess?.maxSlots || 15)
+    );
 
-    if (["on", "activar", "encender", "publico", "public"].includes(effectiveAction)) {
+    if (parsed.action === "on") {
       if (!esOwner) {
         return sock.sendMessage(
           from,
@@ -145,15 +266,17 @@ export default {
         );
       }
 
-      runtime.setSubbotPublicRequests(true);
+      const nextState = runtime.setSubbotPublicRequests(true);
 
       return sock.sendMessage(
         from,
         {
           text:
-            `*SUBBOT ACTIVADO*\n\n` +
+            `*SUBBOTS ACTIVADOS*\n\n` +
             `Acceso publico: *ENCENDIDO*\n` +
-            `Ahora todos pueden usar *${prefix}subbot* para pedir el codigo.\n` +
+            `Capacidad total: *${nextState.maxSlots} slots*\n` +
+            `Slots libres: *${nextState.availableSlots}*\n` +
+            `Ahora todos pueden usar *${prefix}subbot* para pedir codigo.\n` +
             `En este chat: ${chatStatus}`,
           ...global.channelInfo,
         },
@@ -161,27 +284,29 @@ export default {
       );
     }
 
-    if (["off", "desactivar", "apagar", "cerrar", "close"].includes(effectiveAction)) {
+    if (parsed.action === "off") {
       if (!esOwner) {
         return sock.sendMessage(
           from,
           {
-            text: "Solo el owner puede apagar el acceso al subbot.",
+            text: "Solo el owner puede apagar el acceso a los subbots.",
             ...global.channelInfo,
           },
           quoted
         );
       }
 
-      runtime.setSubbotPublicRequests(false);
+      const nextState = runtime.setSubbotPublicRequests(false);
 
       return sock.sendMessage(
         from,
         {
           text:
-            `*SUBBOT APAGADO*\n\n` +
+            `*SUBBOTS APAGADOS*\n\n` +
             `Acceso publico: *APAGADO*\n` +
-            `Nadie podra pedir el codigo del subbot hasta que lo vuelvas a activar.\n` +
+            `Slots configurables: *${nextState.maxSlots}*\n` +
+            `Slots libres: *${nextState.availableSlots}*\n` +
+            `Nadie podra pedir codigo hasta que vuelvas a activarlo.\n` +
             `En este chat: ${chatStatus}`,
           ...global.channelInfo,
         },
@@ -189,12 +314,18 @@ export default {
       );
     }
 
-    if (["list", "lista", "status", "estado", "panel"].includes(effectiveAction)) {
-      const bots = runtime.listBots();
+    if (parsed.action === "list") {
+      const bots = runtime
+        .listBots()
+        .slice()
+        .sort((a, b) => Number(a.slot || 0) - Number(b.slot || 0));
       const publicLabel = subbotAccess.publicRequests ? "ENCENDIDO" : "APAGADO";
+      const activeCount = bots.filter((bot) => bot.connected).length;
+      const linkedCount = bots.filter((bot) => bot.registered).length;
+      const enabledCount = bots.filter((bot) => bot.enabled).length;
       const lines = bots.length
         ? bots.map((bot) => buildSubbotCard(bot))
-        : ["• No hay subbots activos en este momento."];
+        : ["No hay slots de subbot disponibles."];
 
       return sock.sendMessage(
         from,
@@ -202,29 +333,39 @@ export default {
           text:
             `*PANEL SUBBOTS*\n\n` +
             `Modo publico: *${publicLabel}*\n` +
+            `Capacidad: *${subbotAccess.maxSlots} slots*\n` +
+            `Slots libres: *${subbotAccess.availableSlots}*\n` +
+            `Slots activados: *${enabledCount}*\n` +
+            `Subbots vinculados: *${linkedCount}*\n` +
+            `Activos ahora: *${activeCount}*\n` +
             `Hora actual: ${formatDateTime(Date.now())}\n` +
             `En este chat: ${chatStatus}\n\n` +
             `${lines.join("\n\n")}\n\n` +
             `Comandos:\n` +
-            `• ${prefix}subbot\n` +
-            `• ${prefix}subbot 519xxxxxxxxx\n` +
-            `• ${prefix}subbot on\n` +
-            `• ${prefix}subbot off`,
+            `${prefix}subbot\n` +
+            `${prefix}subbot 3\n` +
+            `${prefix}subbot 519xxxxxxxxx\n` +
+            `${prefix}subbot 3 519xxxxxxxxx\n` +
+            `${prefix}codigosubbots\n` +
+            `${prefix}subbot on\n` +
+            `${prefix}subbot off`,
           ...global.channelInfo,
         },
         quoted
       );
     }
 
-    if (rawArg && !requestedNumber) {
+    if (parsed.action === "invalid") {
       return sock.sendMessage(
         from,
         {
           text:
             `Uso correcto:\n` +
             `*${prefix}subbot*\n` +
+            `*${prefix}subbot 3*\n` +
             `*${prefix}subbot 519xxxxxxxxx*\n` +
-            `*${prefix}subbot list*\n` +
+            `*${prefix}subbot 3 519xxxxxxxxx*\n` +
+            `*${prefix}codigosubbots*\n` +
             `*${prefix}subbot on*\n` +
             `*${prefix}subbot off*`,
           ...global.channelInfo,
@@ -238,8 +379,8 @@ export default {
         from,
         {
           text:
-            `*SUBBOT APAGADO POR OWNER*\n\n` +
-            `Ahora mismo nadie puede pedir el codigo del subbot.\n` +
+            `*SUBBOTS APAGADOS POR OWNER*\n\n` +
+            `Ahora mismo nadie puede pedir codigo.\n` +
             `En este chat: ${chatStatus}`,
           ...global.channelInfo,
         },
@@ -247,39 +388,62 @@ export default {
       );
     }
 
+    const targetNumber = parsed.number || senderNumber;
+    const loadingText =
+      parsed.slot
+        ? `Generando codigo del subbot ${parsed.slot} para ${targetNumber || "tu numero"}...`
+        : `Generando codigo para tu subbot ${targetNumber || "automatico"}...`;
+
     await sock.sendMessage(
       from,
       {
         text:
-          `Generando codigo del subbot...\n` +
+          `${loadingText}\n` +
           `Modo publico: *${subbotAccess.publicRequests ? "ENCENDIDO" : "APAGADO"}*`,
         ...global.channelInfo,
       },
       quoted
     );
 
-    const result = await runtime.requestBotPairingCode("subbot", {
-      number: requestedNumber,
-      useCache: !requestedNumber,
-    });
+    const result = await runtime.requestBotPairingCode(
+      parsed.slot ? `subbot${parsed.slot}` : "subbot",
+      {
+        number: targetNumber,
+        requesterNumber: senderNumber,
+        requesterJid: String(sender || ""),
+        useCache: !parsed.number,
+      }
+    );
 
     if (!result?.ok) {
       let text = result?.message || "No pude obtener el codigo del subbot.";
 
       if (result?.status === "missing_bot") {
         text =
-          "El subbot no esta activo en este momento. Revisa que `subbot.enabled` siga en true.";
+          `No encontre ese slot de subbot.\n` +
+          `Usa un numero del 1 al ${subbotAccess.maxSlots}.`;
+      } else if (result?.status === "no_capacity") {
+        text =
+          `No hay slots libres ahora mismo.\n` +
+          `Revisa *${prefix}codigosubbots* para ver quien esta conectado.`;
+      } else if (result?.status === "slot_busy") {
+        text =
+          `${result.message}\n` +
+          `Prueba con otro slot o revisa *${prefix}codigosubbots*.`;
       } else if (result?.status === "main_not_ready") {
         text = "Primero vincula y conecta el bot principal desde la consola.";
       } else if (result?.status === "already_linked") {
-        text = `El subbot ya esta vinculado y funcionando.\nEn este chat: ${chatStatus}`;
+        text =
+          `Ese subbot ya esta vinculado y funcionando.\n` +
+          `En este chat: ${chatStatus}`;
       } else if (result?.status === "pending") {
         text =
-          "Ya hay una solicitud de codigo en proceso para el subbot. Espera un momento y vuelve a intentar.";
+          "Ya hay una solicitud de codigo en proceso para ese subbot. Espera un momento y vuelve a intentar.";
       } else if (result?.status === "missing_number") {
+        const slotHint = parsed.slot ? ` ${parsed.slot}` : "";
         text =
-          `Debes enviar el numero con codigo de pais.\n` +
-          `Ejemplo: *${prefix}subbot 51912345678*`;
+          `No pude detectar tu numero automaticamente.\n` +
+          `Usa: *${prefix}subbot${slotHint} 51912345678*`;
       }
 
       return sock.sendMessage(
@@ -292,9 +456,10 @@ export default {
       );
     }
 
+    const slotLabel = result.slot ? ` ${result.slot}` : "";
     const header = result.cached
-      ? "CODIGO ACTUAL DEL SUBBOT"
-      : "CODIGO DE VINCULACION DEL SUBBOT";
+      ? `CODIGO ACTUAL DEL SUBBOT${slotLabel}`
+      : `CODIGO DE VINCULACION DEL SUBBOT${slotLabel}`;
 
     return sock.sendMessage(
       from,
@@ -303,6 +468,7 @@ export default {
           `*${header}*\n\n` +
           `Bot: *${result.displayName}*\n` +
           `Numero: *${result.number}*\n` +
+          `Solicitante: *${senderNumber || result.number}*\n` +
           `Codigo: *${result.code}*\n` +
           `Expira aprox: *${formatDuration(result.expiresInMs)}*\n` +
           `En este chat: ${chatStatus}\n\n` +

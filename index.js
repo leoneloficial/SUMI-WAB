@@ -33,6 +33,7 @@ const {
 
 const DEFAULT_AUTH_FOLDER = "dvyer-session";
 const DEFAULT_SUBBOT_AUTH_FOLDER = "dvyer-session-subbot";
+const MAX_SUBBOT_SLOTS = 15;
 const PAIRING_CODE_CACHE_MS = 60_000;
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
@@ -45,34 +46,163 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SETTINGS_FILE = path.join(__dirname, "settings", "settings.json");
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function getDefaultSubbotAuthFolder(slotNumber) {
+  return slotNumber === 1
+    ? DEFAULT_SUBBOT_AUTH_FOLDER
+    : `${DEFAULT_SUBBOT_AUTH_FOLDER}-${slotNumber}`;
+}
+
+function getDefaultSubbotLabel(slotNumber) {
+  return `SUBBOT${slotNumber}`;
+}
+
+function getDefaultSubbotName(currentSettings, slotNumber) {
+  return `${currentSettings?.botName || "DVYER"} Subbot ${slotNumber}`;
+}
+
+function normalizeTimestamp(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function normalizeSubbotSlotConfig(
+  slotConfig,
+  slotNumber,
+  currentSettings,
+  legacySubbot = {}
+) {
+  const source = isPlainObject(slotConfig) ? slotConfig : {};
+  const fallback = slotNumber === 1 && isPlainObject(legacySubbot)
+    ? legacySubbot
+    : {};
+
+  const enabled =
+    typeof source.enabled === "boolean"
+      ? source.enabled
+      : typeof fallback.enabled === "boolean"
+        ? fallback.enabled
+        : slotNumber === 1;
+
+  const label =
+    String(
+      source.label ||
+        fallback.label ||
+        getDefaultSubbotLabel(slotNumber)
+    )
+      .trim()
+      .toUpperCase() || getDefaultSubbotLabel(slotNumber);
+
+  const name =
+    String(
+      source.name ||
+        fallback.name ||
+        getDefaultSubbotName(currentSettings, slotNumber)
+    ).trim() || getDefaultSubbotName(currentSettings, slotNumber);
+
+  const authFolder =
+    String(
+      source.authFolder ||
+        fallback.authFolder ||
+        getDefaultSubbotAuthFolder(slotNumber)
+    ).trim() || getDefaultSubbotAuthFolder(slotNumber);
+
+  const pairingNumber =
+    sanitizePhoneNumber(
+      source.pairingNumber ||
+        source.botNumber ||
+        fallback.pairingNumber ||
+        fallback.botNumber ||
+        ""
+    ) || "";
+
+  const requesterNumber =
+    sanitizePhoneNumber(
+      source.requesterNumber ||
+        source.ownerNumber ||
+        fallback.requesterNumber ||
+        fallback.ownerNumber ||
+        pairingNumber
+    ) || "";
+
+  const requesterJid =
+    String(
+      source.requesterJid ||
+        source.ownerJid ||
+        fallback.requesterJid ||
+        fallback.ownerJid ||
+        ""
+    ).trim() || "";
+
+  const requestedAt = normalizeTimestamp(
+    source.requestedAt || fallback.requestedAt || 0
+  );
+
+  const releasedAt = normalizeTimestamp(
+    source.releasedAt || fallback.releasedAt || 0
+  );
+
+  return {
+    slot: slotNumber,
+    id: `subbot${slotNumber}`,
+    enabled,
+    label,
+    name,
+    authFolder,
+    pairingNumber,
+    requesterNumber,
+    requesterJid,
+    requestedAt,
+    releasedAt,
+  };
+}
+
+function buildSubbotSlotConfigs(currentSettings) {
+  const legacySubbot = isPlainObject(currentSettings?.subbot)
+    ? currentSettings.subbot
+    : {};
+  const rawSlots = Array.isArray(currentSettings?.subbots)
+    ? currentSettings.subbots
+    : [];
+
+  return Array.from({ length: MAX_SUBBOT_SLOTS }, (_, index) =>
+    normalizeSubbotSlotConfig(
+      rawSlots[index],
+      index + 1,
+      currentSettings,
+      legacySubbot
+    )
+  );
+}
+
 function ensureSubbotSettings(currentSettings) {
-  if (!currentSettings?.subbot || typeof currentSettings.subbot !== "object") {
+  if (!isPlainObject(currentSettings?.subbot)) {
     currentSettings.subbot = {};
-  }
-
-  if (typeof currentSettings.subbot.enabled !== "boolean") {
-    currentSettings.subbot.enabled = false;
-  }
-
-  if (!String(currentSettings.subbot.label || "").trim()) {
-    currentSettings.subbot.label = "SUBBOT";
-  }
-
-  if (!String(currentSettings.subbot.name || "").trim()) {
-    currentSettings.subbot.name = `${currentSettings.botName || "DVYER"} Subbot`;
-  }
-
-  if (!String(currentSettings.subbot.authFolder || "").trim()) {
-    currentSettings.subbot.authFolder = DEFAULT_SUBBOT_AUTH_FOLDER;
-  }
-
-  if (typeof currentSettings.subbot.pairingNumber !== "string") {
-    currentSettings.subbot.pairingNumber = "";
   }
 
   if (typeof currentSettings.subbot.publicRequests !== "boolean") {
     currentSettings.subbot.publicRequests = true;
   }
+
+  if (currentSettings.subbot.maxSlots !== MAX_SUBBOT_SLOTS) {
+    currentSettings.subbot.maxSlots = MAX_SUBBOT_SLOTS;
+  }
+
+  currentSettings.subbots = buildSubbotSlotConfigs(currentSettings).map((slot) => ({
+    slot: slot.slot,
+    enabled: slot.enabled,
+    label: slot.label,
+    name: slot.name,
+    authFolder: slot.authFolder,
+    pairingNumber: slot.pairingNumber,
+    requesterNumber: slot.requesterNumber,
+    requesterJid: slot.requesterJid,
+    requestedAt: slot.requestedAt,
+    releasedAt: slot.releasedAt,
+  }));
 }
 
 function saveSettingsFile() {
@@ -303,55 +433,160 @@ function extractCommandData(text, currentSettings) {
   };
 }
 
-function buildBotConfigs(currentSettings) {
-  const configs = [];
-
+function buildMainBotConfig(currentSettings) {
   const mainAuthFolder =
     String(currentSettings?.authFolder || DEFAULT_AUTH_FOLDER).trim() ||
     DEFAULT_AUTH_FOLDER;
 
-  configs.push({
+  return {
     id: "main",
+    slot: 0,
+    enabled: true,
     label: "MAIN",
     displayName: String(currentSettings?.botName || "DVYER").trim() || "DVYER",
     authFolder: mainAuthFolder,
     pairingNumber: sanitizePhoneNumber(currentSettings?.pairingNumber) || "",
-  });
-
-  if (currentSettings?.subbot?.enabled) {
-    let subbotAuthFolder =
-      String(
-        currentSettings?.subbot?.authFolder || DEFAULT_SUBBOT_AUTH_FOLDER
-      ).trim() || DEFAULT_SUBBOT_AUTH_FOLDER;
-
-    if (subbotAuthFolder === mainAuthFolder) {
-      subbotAuthFolder = `${mainAuthFolder}-subbot`;
-    }
-
-    configs.push({
-      id: "subbot",
-      label:
-        String(currentSettings?.subbot?.label || "SUBBOT")
-          .trim()
-          .toUpperCase() || "SUBBOT",
-      displayName:
-        String(
-          currentSettings?.subbot?.name ||
-            `${currentSettings?.botName || "DVYER"} Subbot`
-        ).trim() || "DVYER Subbot",
-      authFolder: subbotAuthFolder,
-      pairingNumber:
-        sanitizePhoneNumber(currentSettings?.subbot?.pairingNumber) ||
-        sanitizePhoneNumber(currentSettings?.subbot?.botNumber) ||
-        "",
-    });
-  }
-
-  return configs;
+  };
 }
 
-const BOT_CONFIGS = buildBotConfigs(settings);
+function buildBotConfigs(currentSettings) {
+  const mainConfig = buildMainBotConfig(currentSettings);
+  const subbotConfigs = buildSubbotSlotConfigs(currentSettings).map((slotConfig) => {
+    let authFolder =
+      String(slotConfig?.authFolder || getDefaultSubbotAuthFolder(slotConfig.slot)).trim() ||
+      getDefaultSubbotAuthFolder(slotConfig.slot);
+
+    if (authFolder === mainConfig.authFolder) {
+      authFolder = `${mainConfig.authFolder}-subbot-${slotConfig.slot}`;
+    }
+
+    return {
+      id: slotConfig.id,
+      slot: slotConfig.slot,
+      enabled: Boolean(slotConfig.enabled),
+      label: String(slotConfig.label || getDefaultSubbotLabel(slotConfig.slot))
+        .trim()
+        .toUpperCase() || getDefaultSubbotLabel(slotConfig.slot),
+      displayName:
+        String(slotConfig.name || getDefaultSubbotName(currentSettings, slotConfig.slot)).trim() ||
+        getDefaultSubbotName(currentSettings, slotConfig.slot),
+      authFolder,
+      pairingNumber: sanitizePhoneNumber(slotConfig.pairingNumber) || "",
+      requesterNumber: sanitizePhoneNumber(slotConfig.requesterNumber) || "",
+      requesterJid: String(slotConfig.requesterJid || "").trim(),
+      requestedAt: normalizeTimestamp(slotConfig.requestedAt),
+      releasedAt: normalizeTimestamp(slotConfig.releasedAt),
+    };
+  });
+
+  return [
+    mainConfig,
+    ...subbotConfigs.filter((config) => config.enabled),
+  ];
+}
+
+let SUBBOT_SLOT_CONFIGS = buildSubbotSlotConfigs(settings);
+let BOT_CONFIGS = buildBotConfigs(settings);
 const OWNER_IDS = buildOwnerIds(settings);
+
+function getSubbotConfigBySlot(slotNumber) {
+  return SUBBOT_SLOT_CONFIGS.find((config) => config.slot === Number(slotNumber)) || null;
+}
+
+function getSubbotAssignedNumber(config = {}) {
+  return (
+    sanitizePhoneNumber(config?.requesterNumber) ||
+    sanitizePhoneNumber(config?.pairingNumber) ||
+    ""
+  );
+}
+
+function pickDefaultSubbotConfig(options = {}) {
+  const preferredNumber =
+    sanitizePhoneNumber(options?.number) ||
+    sanitizePhoneNumber(options?.requesterNumber) ||
+    "";
+
+  const summaries = SUBBOT_SLOT_CONFIGS
+    .map((config) => summarizeBotConfig(config))
+    .sort((a, b) => a.slot - b.slot);
+
+  if (preferredNumber) {
+    const sameRequester = summaries.find(
+      (bot) => getSubbotAssignedNumber(bot) === preferredNumber
+    );
+    if (sameRequester) {
+      return getSubbotConfigBySlot(sameRequester.slot);
+    }
+  }
+
+  const preferred =
+    summaries.find(
+      (bot) =>
+        bot.enabled &&
+        !bot.registered &&
+        !bot.connected &&
+        !bot.pairingPending &&
+        !getSubbotAssignedNumber(bot)
+    ) ||
+    summaries.find(
+      (bot) =>
+        !bot.enabled &&
+        !bot.registered &&
+        !bot.connected &&
+        !bot.pairingPending
+    ) ||
+    summaries.find(
+      (bot) =>
+        !bot.registered &&
+        !bot.connected &&
+        !bot.pairingPending &&
+        !bot.hasConfiguredNumber &&
+        !getSubbotAssignedNumber(bot)
+    ) ||
+    null;
+
+  return preferred ? getSubbotConfigBySlot(preferred.slot) : null;
+}
+
+function getSubbotConfigById(botId) {
+  const normalized = String(botId || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "subbot") {
+    return pickDefaultSubbotConfig();
+  }
+
+  const asSlot = Number.parseInt(normalized, 10);
+  if (Number.isInteger(asSlot) && asSlot >= 1 && asSlot <= MAX_SUBBOT_SLOTS) {
+    return getSubbotConfigBySlot(asSlot);
+  }
+
+  return (
+    SUBBOT_SLOT_CONFIGS.find((config) => config.id === normalized) ||
+    SUBBOT_SLOT_CONFIGS.find((config) => config.label.toLowerCase() === normalized) ||
+    null
+  );
+}
+
+function getBotConfigById(botId) {
+  const normalized = String(botId || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "main") return buildMainBotConfig(settings);
+  return getSubbotConfigById(normalized);
+}
+
+function resolveSubbotTargetConfig(botId, options = {}) {
+  const normalized = String(botId || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized !== "subbot") {
+    return getBotConfigById(normalized);
+  }
+
+  return pickDefaultSubbotConfig({
+    number: options?.number,
+    requesterNumber: options?.requesterNumber,
+  });
+}
 
 // ================= ESTADO =================
 
@@ -496,7 +731,13 @@ function createStoreForBot(botId) {
 
 function ensureBotState(config) {
   const existing = botStates.get(config.id);
-  if (existing) return existing;
+  if (existing) {
+    existing.config = {
+      ...existing.config,
+      ...config,
+    };
+    return existing;
+  }
 
   const state = {
     config,
@@ -520,6 +761,64 @@ function ensureBotState(config) {
   return state;
 }
 
+function refreshBotConfigCache() {
+  ensureSubbotSettings(settings);
+  SUBBOT_SLOT_CONFIGS = buildSubbotSlotConfigs(settings);
+  BOT_CONFIGS = buildBotConfigs(settings);
+
+  const knownConfigs = [
+    buildMainBotConfig(settings),
+    ...SUBBOT_SLOT_CONFIGS,
+  ];
+
+  for (const config of knownConfigs) {
+    ensureBotState(config);
+  }
+
+  return {
+    subbots: SUBBOT_SLOT_CONFIGS,
+    bots: BOT_CONFIGS,
+  };
+}
+
+function saveSubbotSlotConfig(slotNumber, updates = {}) {
+  const slot = Number(slotNumber);
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_SUBBOT_SLOTS) {
+    return null;
+  }
+
+  ensureSubbotSettings(settings);
+
+  const currentConfig = getSubbotConfigBySlot(slot) || normalizeSubbotSlotConfig({}, slot, settings);
+  const nextConfig = normalizeSubbotSlotConfig(
+    {
+      ...currentConfig,
+      ...updates,
+    },
+    slot,
+    settings,
+    settings.subbot
+  );
+
+  settings.subbots[slot - 1] = {
+    slot: nextConfig.slot,
+    enabled: nextConfig.enabled,
+    label: nextConfig.label,
+    name: nextConfig.name,
+    authFolder: nextConfig.authFolder,
+    pairingNumber: nextConfig.pairingNumber,
+    requesterNumber: nextConfig.requesterNumber,
+    requesterJid: nextConfig.requesterJid,
+    requestedAt: nextConfig.requestedAt,
+    releasedAt: nextConfig.releasedAt,
+  };
+
+  saveSettingsFile();
+  refreshBotConfigCache();
+
+  return getSubbotConfigBySlot(slot);
+}
+
 function cachedGroupMetadata(botState, jid) {
   return botState.groupCache.get(jid) || undefined;
 }
@@ -530,6 +829,85 @@ function getQuoteOptions(message) {
 
 function isBotRegistered(botState) {
   return Boolean(botState?.authState?.creds?.registered);
+}
+
+function clearReconnectTimer(botState) {
+  if (!botState?.reconnectTimer) return;
+  clearTimeout(botState.reconnectTimer);
+  botState.reconnectTimer = null;
+}
+
+function removeAuthFolder(authFolder) {
+  if (!String(authFolder || "").trim()) return;
+
+  try {
+    fs.rmSync(authFolder, { recursive: true, force: true });
+  } catch {}
+}
+
+function releaseSubbotSlot(botState, options = {}) {
+  if (!botState || botState?.config?.id === "main") {
+    return false;
+  }
+
+  const slot = Number(botState?.config?.slot || 0);
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_SUBBOT_SLOTS) {
+    return false;
+  }
+
+  const releaseAt = Date.now();
+  const currentConfig = getSubbotConfigBySlot(slot) || botState.config;
+
+  clearReconnectTimer(botState);
+  clearPairingResetTimer(botState);
+
+  if (options?.closeSocket !== false) {
+    try {
+      botState.sock?.end?.();
+    } catch {}
+  }
+
+  if (options?.resetAuthFolder !== false) {
+    removeAuthFolder(currentConfig?.authFolder || botState?.config?.authFolder);
+  }
+
+  const releasedConfig =
+    saveSubbotSlotConfig(slot, {
+      enabled: false,
+      pairingNumber: "",
+      requesterNumber: "",
+      requesterJid: "",
+      requestedAt: 0,
+      releasedAt: releaseAt,
+    }) || currentConfig;
+
+  botState.sock = null;
+  botState.authState = null;
+  botState.connecting = false;
+  botState.connectedAt = 0;
+  botState.lastDisconnectAt = releaseAt;
+  botState.pairingRequested = false;
+  botState.pairingCommandHintShown = false;
+  botState.lastPairingCode = "";
+  botState.lastPairingNumber = "";
+  botState.lastPairingAt = 0;
+  botState.config = {
+    ...botState.config,
+    ...releasedConfig,
+    enabled: false,
+    pairingNumber: "",
+    requesterNumber: "",
+    requesterJid: "",
+    requestedAt: 0,
+    releasedAt: releaseAt,
+  };
+  botState.groupCache?.clear?.();
+
+  console.log(
+    `${getBotTag(botState)} Slot liberado (${options?.reason || "sin motivo"})`
+  );
+
+  return true;
 }
 
 function createBaseContext(botState, sock, message, extra = {}) {
@@ -686,7 +1064,11 @@ async function canRunCommand(cmd, context) {
 }
 
 function scheduleReconnect(botState, ms = 2500) {
-  if (botState.reconnectTimer) clearTimeout(botState.reconnectTimer);
+  if (botState?.config?.id !== "main" && botState?.config?.enabled === false) {
+    return;
+  }
+
+  clearReconnectTimer(botState);
   botState.reconnectTimer = setTimeout(() => {
     botState.reconnectTimer = null;
     iniciarInstanciaBot(botState.config);
@@ -793,7 +1175,20 @@ function cachePairingCode(botState, code, number) {
   botState.lastPairingAt = Date.now();
 
   botState.pairingResetTimer = setTimeout(() => {
+    const shouldRelease =
+      botState?.config?.id !== "main" &&
+      !isBotRegistered(botState) &&
+      !botState?.sock?.user?.id;
+
     resetPairingCache(botState);
+
+    if (shouldRelease) {
+      releaseSubbotSlot(botState, {
+        reason: "pairing_expirado",
+        closeSocket: true,
+        resetAuthFolder: true,
+      });
+    }
   }, PAIRING_CODE_CACHE_MS);
 
   botState.pairingResetTimer.unref?.();
@@ -823,13 +1218,18 @@ function summarizeBotState(botState) {
   const registered = isBotRegistered(botState);
   const connected = Boolean(botState?.sock?.user?.id);
   const configuredNumber = sanitizePhoneNumber(config?.pairingNumber);
+  const requesterNumber = sanitizePhoneNumber(config?.requesterNumber) || configuredNumber;
+  const requestedAt = normalizeTimestamp(config?.requestedAt);
+  const connectedForMs =
+    connected && botState?.connectedAt ? Math.max(0, Date.now() - botState.connectedAt) : 0;
 
   return {
     id: String(config.id || ""),
+    slot: Number(config.slot || 0),
     label: String(config.label || "BOT"),
     displayName: String(config.displayName || "Bot"),
     authFolder: String(config.authFolder || ""),
-    enabled: true,
+    enabled: config.enabled !== false,
     registered,
     connected,
     connecting: Boolean(botState?.connecting),
@@ -837,11 +1237,53 @@ function summarizeBotState(botState) {
     connectedAt: Number(botState?.connectedAt || 0),
     lastDisconnectAt: Number(botState?.lastDisconnectAt || 0),
     configuredNumber,
+    requesterNumber,
+    requesterJid: String(config?.requesterJid || ""),
+    requestedAt,
+    releasedAt: normalizeTimestamp(config?.releasedAt),
+    connectedForMs,
     hasConfiguredNumber: Boolean(configuredNumber),
     pairingPending: Boolean(botState?.pairingRequested),
     cachedPairingCode: cachedPairing?.code || "",
     cachedPairingNumber: cachedPairing?.number || "",
     cachedPairingExpiresInMs: cachedPairing?.expiresInMs || 0,
+  };
+}
+
+function summarizeBotConfig(config) {
+  const botState = botStates.get(config.id);
+  if (botState) {
+    return summarizeBotState(botState);
+  }
+
+  const configuredNumber = sanitizePhoneNumber(config?.pairingNumber);
+  const requesterNumber = sanitizePhoneNumber(config?.requesterNumber) || configuredNumber;
+  const requestedAt = normalizeTimestamp(config?.requestedAt);
+
+  return {
+    id: String(config?.id || ""),
+    slot: Number(config?.slot || 0),
+    label: String(config?.label || "BOT"),
+    displayName: String(config?.displayName || "Bot"),
+    authFolder: String(config?.authFolder || ""),
+    enabled: config?.enabled !== false,
+    registered: false,
+    connected: false,
+    connecting: false,
+    hasSocket: false,
+    connectedAt: 0,
+    lastDisconnectAt: 0,
+    configuredNumber,
+    requesterNumber,
+    requesterJid: String(config?.requesterJid || ""),
+    requestedAt,
+    releasedAt: normalizeTimestamp(config?.releasedAt),
+    connectedForMs: 0,
+    hasConfiguredNumber: Boolean(configuredNumber),
+    pairingPending: false,
+    cachedPairingCode: "",
+    cachedPairingNumber: "",
+    cachedPairingExpiresInMs: 0,
   };
 }
 
@@ -920,6 +1362,7 @@ async function requestPairingCode(botState, options = {}) {
       cached: true,
       label: botState.config.label,
       displayName: botState.config.displayName,
+      slot: Number(botState.config.slot || 0),
       code: cached.code,
       number: cached.number,
       expiresInMs: cached.expiresInMs,
@@ -943,12 +1386,19 @@ async function requestPairingCode(botState, options = {}) {
   }
 
   if (!resolvedNumber) {
+    const prefix =
+      (Array.isArray(settings.prefix) ? settings.prefix[0] : settings.prefix) || ".";
+    const slotHint =
+      botState?.config?.id === "main"
+        ? ""
+        : ` ${Number(botState?.config?.slot || 1)}`;
+
     return {
       ok: false,
       status: "missing_number",
-      message: `Primero vincula el bot principal por consola y luego usa ${
-        Array.isArray(settings.prefix) ? settings.prefix[0] || "." : settings.prefix || "."
-      }subbot 519xxxxxxxxx para pedir el codigo.`,
+      message:
+        `Primero vincula el bot principal por consola y luego usa ` +
+        `${prefix}subbot${slotHint} 519xxxxxxxxx para pedir el codigo.`,
     };
   }
 
@@ -988,6 +1438,7 @@ async function requestPairingCode(botState, options = {}) {
       cached: false,
       label: botState.config.label,
       displayName: botState.config.displayName,
+      slot: Number(botState.config.slot || 0),
       code,
       number: resolvedNumber,
       expiresInMs: PAIRING_CODE_CACHE_MS,
@@ -1051,15 +1502,99 @@ async function requestPairingCodeSafe(botState) {
 
 global.botRuntime = {
   requestBotPairingCode: async (botId, options = {}) => {
-    const targetState = botStates.get(String(botId || "").toLowerCase());
+    const requestedBotId = String(botId || "").trim().toLowerCase();
+    let targetConfig =
+      requestedBotId === "main"
+        ? getBotConfigById("main")
+        : resolveSubbotTargetConfig(requestedBotId || "subbot", options);
 
-    if (!targetState) {
+    if (!targetConfig) {
       return {
         ok: false,
-        status: "missing_bot",
-        message: "No encontre ese bot para vincular.",
+        status: requestedBotId === "subbot" ? "no_capacity" : "missing_bot",
+        message:
+          requestedBotId === "subbot"
+            ? "No hay slots libres para crear otro subbot ahora mismo."
+            : "No encontre ese bot para vincular.",
       };
     }
+
+    if (targetConfig.id !== "main") {
+      const explicitNumber = sanitizePhoneNumber(options?.number);
+      const requesterNumber =
+        sanitizePhoneNumber(options?.requesterNumber) || explicitNumber;
+      const requesterJid = String(options?.requesterJid || "").trim();
+      const persistedConfig = getSubbotConfigBySlot(targetConfig.slot) || targetConfig;
+      const persistedSummary = summarizeBotConfig(persistedConfig);
+      const assignedNumber = getSubbotAssignedNumber(persistedSummary);
+      const nextPairingNumber =
+        explicitNumber || requesterNumber || sanitizePhoneNumber(persistedConfig.pairingNumber);
+      const nextRequesterNumber = requesterNumber || nextPairingNumber;
+      const isRequestedSlot = requestedBotId !== "subbot";
+      const slotBusy =
+        persistedSummary.connected ||
+        persistedSummary.registered ||
+        persistedSummary.pairingPending;
+
+      if (
+        isRequestedSlot &&
+        slotBusy &&
+        assignedNumber &&
+        nextRequesterNumber &&
+        assignedNumber !== nextRequesterNumber
+      ) {
+        return {
+          ok: false,
+          status: "slot_busy",
+          message: `El slot ${persistedConfig.slot} ya esta ocupado por otro subbot.`,
+        };
+      }
+
+      if (!nextPairingNumber && slotBusy) {
+        return {
+          ok: false,
+          status: "slot_busy",
+          message: `El slot ${persistedConfig.slot} ya esta ocupado por otro subbot.`,
+        };
+      }
+
+      if (!nextPairingNumber && !assignedNumber && !slotBusy) {
+        return {
+          ok: false,
+          status: "missing_number",
+          message: "No pude detectar el numero para este subbot.",
+        };
+      }
+
+      const nextRequestedAt =
+        nextRequesterNumber &&
+        (nextRequesterNumber !== sanitizePhoneNumber(persistedConfig.requesterNumber) ||
+          requesterJid !== String(persistedConfig.requesterJid || "").trim() ||
+          persistedConfig.enabled !== true)
+          ? Date.now()
+          : normalizeTimestamp(persistedConfig.requestedAt);
+
+      if (
+        persistedConfig.enabled !== true ||
+        nextPairingNumber !== sanitizePhoneNumber(persistedConfig.pairingNumber) ||
+        nextRequesterNumber !== sanitizePhoneNumber(persistedConfig.requesterNumber) ||
+        requesterJid !== String(persistedConfig.requesterJid || "").trim() ||
+        nextRequestedAt !== normalizeTimestamp(persistedConfig.requestedAt) ||
+        normalizeTimestamp(persistedConfig.releasedAt) !== 0
+      ) {
+        targetConfig =
+          saveSubbotSlotConfig(targetConfig.slot, {
+            enabled: true,
+            pairingNumber: nextPairingNumber,
+            requesterNumber: nextRequesterNumber,
+            requesterJid,
+            requestedAt: nextRequestedAt,
+            releasedAt: 0,
+          }) || targetConfig;
+      }
+    }
+
+    const targetState = ensureBotState(targetConfig);
 
     return requestPairingCode(targetState, {
       number: options?.number,
@@ -1071,30 +1606,56 @@ global.botRuntime = {
   listBots: (options = {}) => {
     const includeMain = options?.includeMain === true;
     const onlyConnected = options?.onlyConnected === true;
-
-    const bots = Array.from(botStates.values())
-      .filter((botState) => includeMain || botState?.config?.id !== "main")
-      .map((botState) => summarizeBotState(botState))
+    const subbots = SUBBOT_SLOT_CONFIGS
+      .map((config) => summarizeBotConfig(config))
       .filter((bot) => !onlyConnected || bot.connected);
 
-    return bots;
+    if (!includeMain) {
+      return subbots;
+    }
+
+    const mainBot = summarizeBotConfig(buildMainBotConfig(settings));
+    return [mainBot, ...subbots].filter((bot) => !onlyConnected || bot.connected);
   },
   getSubbotRequestState: () => ({
-    enabled: Boolean(settings?.subbot?.enabled),
     publicRequests: settings?.subbot?.publicRequests !== false,
-    label: String(settings?.subbot?.label || "SUBBOT"),
-    name: String(settings?.subbot?.name || "DVYER Subbot"),
+    maxSlots: Number(settings?.subbot?.maxSlots || MAX_SUBBOT_SLOTS),
+    enabledSlots: SUBBOT_SLOT_CONFIGS.filter((config) => config.enabled).length,
+    availableSlots: SUBBOT_SLOT_CONFIGS
+      .map((config) => summarizeBotConfig(config))
+      .filter(
+        (bot) =>
+          !bot.connected &&
+          !bot.registered &&
+          !bot.pairingPending &&
+          !getSubbotAssignedNumber(bot)
+      ).length,
+    activeSlots: SUBBOT_SLOT_CONFIGS
+      .map((config) => summarizeBotConfig(config))
+      .filter((bot) => bot.connected).length,
   }),
   setSubbotPublicRequests: (enabled) => {
     ensureSubbotSettings(settings);
     settings.subbot.publicRequests = Boolean(enabled);
     saveSettingsFile();
+    refreshBotConfigCache();
 
     return {
-      enabled: Boolean(settings.subbot.enabled),
       publicRequests: settings.subbot.publicRequests,
-      label: String(settings.subbot.label || "SUBBOT"),
-      name: String(settings.subbot.name || "DVYER Subbot"),
+      maxSlots: Number(settings.subbot.maxSlots || MAX_SUBBOT_SLOTS),
+      enabledSlots: SUBBOT_SLOT_CONFIGS.filter((config) => config.enabled).length,
+      availableSlots: SUBBOT_SLOT_CONFIGS
+        .map((config) => summarizeBotConfig(config))
+        .filter(
+          (bot) =>
+            !bot.connected &&
+            !bot.registered &&
+            !bot.pairingPending &&
+            !getSubbotAssignedNumber(bot)
+        ).length,
+      activeSlots: SUBBOT_SLOT_CONFIGS
+        .map((config) => summarizeBotConfig(config))
+        .filter((bot) => bot.connected).length,
     };
   },
 };
@@ -1265,14 +1826,22 @@ async function iniciarInstanciaBot(config) {
             code === 401 || code === DisconnectReason.loggedOut;
 
           if (loggedOut) {
-            try {
-              fs.rmSync(config.authFolder, { recursive: true, force: true });
-            } catch {}
+            removeAuthFolder(config.authFolder);
           }
 
           botState.sock = null;
           botState.lastDisconnectAt = Date.now();
           resetPairingCache(botState);
+
+          if (botState.config?.id !== "main" && loggedOut) {
+            releaseSubbotSlot(botState, {
+              reason: "desconectado",
+              closeSocket: false,
+              resetAuthFolder: false,
+            });
+            return;
+          }
+
           scheduleReconnect(botState, loggedOut ? 4000 : 2500);
         }
       } catch (err) {
