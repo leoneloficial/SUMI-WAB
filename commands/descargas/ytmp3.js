@@ -6,6 +6,8 @@ import { spawn } from "child_process";
 
 const API_BASE = "https://dv-yer-api.online";
 const API_AUDIO_URL = `${API_BASE}/ytdlmp3`;
+const API_AUDIO_LEGACY_URL = `${API_BASE}/ytmp3`;
+const API_AUDIO_ALT_URL = `${API_BASE}/ytaltmp3`;
 const API_SEARCH_URL = `${API_BASE}/ytsearch`;
 
 const COOLDOWN_TIME = 15 * 1000;
@@ -55,23 +57,63 @@ function normalizeAudioFileName(name, fallbackBase = "audio", fallbackExt = "mp3
   return `${base}.${ext}`;
 }
 
-function buildAudioMeta(fileName, contentType, fallbackBase = "audio") {
+function detectAudioFromFile(filePath) {
+  try {
+    const fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(16);
+    const bytesRead = fs.readSync(fd, buffer, 0, 16, 0);
+    fs.closeSync(fd);
+
+    const slice = buffer.subarray(0, bytesRead);
+
+    if (slice.length >= 8 && slice.subarray(4, 8).toString("ascii") === "ftyp") {
+      return { ext: "m4a", mimetype: "audio/mp4", isMp3: false };
+    }
+
+    if (slice.length >= 3 && slice.subarray(0, 3).toString("ascii") === "ID3") {
+      return { ext: "mp3", mimetype: "audio/mpeg", isMp3: true };
+    }
+
+    if (slice.length >= 4 && slice[0] === 0x1a && slice[1] === 0x45 && slice[2] === 0xdf && slice[3] === 0xa3) {
+      return { ext: "webm", mimetype: "audio/webm", isMp3: false };
+    }
+
+    if (slice.length >= 2 && slice[0] === 0xff && (slice[1] & 0xe0) === 0xe0) {
+      return { ext: "mp3", mimetype: "audio/mpeg", isMp3: true };
+    }
+  } catch {}
+
+  return null;
+}
+
+function buildAudioMeta(fileName, contentType, fallbackBase = "audio", sniffed = null) {
   const normalizedType = String(contentType || "").split(";")[0].trim().toLowerCase();
   const rawName = String(fileName || "").trim();
   const ext = path.extname(rawName).replace(/^\./, "").toLowerCase();
 
+  if (sniffed?.ext) {
+    return {
+      fileName: normalizeAudioFileName(rawName, fallbackBase, sniffed.ext),
+      mimetype: sniffed.mimetype,
+      isMp3: sniffed.isMp3,
+    };
+  }
+
   let finalExt = ext || "bin";
   let mimetype = normalizedType || "application/octet-stream";
 
-  if (normalizedType.includes("audio/mpeg") || ext === "mp3") {
+  if (ext === "mp3" || normalizedType.includes("audio/mpeg")) {
     finalExt = "mp3";
     mimetype = "audio/mpeg";
-  } else if (normalizedType.includes("audio/mp4") || ext === "m4a" || ext === "mp4") {
+  } else if (ext === "m4a" || ext === "mp4" || normalizedType.includes("audio/mp4")) {
     finalExt = "m4a";
     mimetype = "audio/mp4";
-  } else if (normalizedType.includes("audio/aac") || ext === "aac") {
+  } else if (ext === "aac" || normalizedType.includes("audio/aac")) {
     finalExt = "aac";
     mimetype = "audio/aac";
+  } else if (ext === "webm" || normalizedType.includes("audio/webm")) {
+    finalExt = "webm";
+    mimetype = "audio/webm";
   }
 
   return {
@@ -83,6 +125,30 @@ function buildAudioMeta(fileName, contentType, fallbackBase = "audio") {
 
 function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value || ""));
+}
+
+function normalizeApiUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("/")) return `${API_BASE}${value}`;
+  return `${API_BASE}/${value}`;
+}
+
+function pickApiDownloadUrl(data) {
+  return (
+    data?.download_url_full ||
+    data?.stream_url_full ||
+    data?.download_url ||
+    data?.stream_url ||
+    data?.url ||
+    data?.result?.download_url_full ||
+    data?.result?.stream_url_full ||
+    data?.result?.download_url ||
+    data?.result?.stream_url ||
+    data?.result?.url ||
+    ""
+  );
 }
 
 function extractYouTubeUrl(text) {
@@ -190,6 +256,131 @@ async function resolveSearch(query) {
   };
 }
 
+async function requestAudioLink(videoUrl, endpointUrl, sourceLabel) {
+  const data = await apiGet(
+    endpointUrl,
+    {
+      mode: "link",
+      quality: AUDIO_QUALITY,
+      url: videoUrl,
+    },
+    45000
+  );
+
+  const downloadUrl = normalizeApiUrl(pickApiDownloadUrl(data));
+  if (!downloadUrl) {
+    throw new Error(`La ruta ${sourceLabel} no devolvió enlace de descarga.`);
+  }
+
+  return {
+    sourceLabel,
+    downloadUrl,
+    title: safeFileName(data?.title || data?.result?.title || "audio"),
+    fileName:
+      String(data?.filename || data?.fileName || data?.result?.filename || "audio.bin").trim() ||
+      "audio.bin",
+  };
+}
+
+async function resolveFastestAudioLink(videoUrl) {
+  try {
+    return await Promise.any([
+      requestAudioLink(videoUrl, API_AUDIO_URL, "principal"),
+      requestAudioLink(videoUrl, API_AUDIO_LEGACY_URL, "legacy"),
+      requestAudioLink(videoUrl, API_AUDIO_ALT_URL, "alterna"),
+    ]);
+  } catch (error) {
+    const messages = Array.isArray(error?.errors)
+      ? error.errors.map((item) => String(item?.message || item || "").trim()).filter(Boolean)
+      : [];
+
+    throw new Error(
+      messages[0] ||
+        "No se pudo obtener un enlace de descarga desde las rutas internas."
+    );
+  }
+}
+
+async function downloadAudioFromInternalLink(downloadUrl, outputPath, suggestedFileName = "audio.bin") {
+  const response = await axios.get(downloadUrl, {
+    responseType: "stream",
+    timeout: REQUEST_TIMEOUT,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+      Accept: "*/*",
+      Referer: `${API_BASE}/`,
+    },
+    validateStatus: () => true,
+    maxRedirects: 5,
+  });
+
+  if (response.status >= 400) {
+    const errorText = await readStreamToText(response.data).catch(() => "");
+    let parsed = null;
+
+    try {
+      parsed = JSON.parse(errorText);
+    } catch {}
+
+    throw new Error(
+      extractApiError(
+        parsed || { message: errorText || "Error al descargar el audio." },
+        response.status
+      )
+    );
+  }
+
+  const contentLength = Number(response.headers?.["content-length"] || 0);
+  if (contentLength && contentLength > MAX_AUDIO_BYTES) {
+    throw new Error("Audio demasiado grande");
+  }
+
+  let downloaded = 0;
+
+  response.data.on("data", (chunk) => {
+    downloaded += chunk.length;
+    if (downloaded > MAX_AUDIO_BYTES) {
+      response.data.destroy(new Error("Audio demasiado grande"));
+    }
+  });
+
+  await pipeline(response.data, fs.createWriteStream(outputPath));
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error("No se pudo descargar el audio.");
+  }
+
+  const size = fs.statSync(outputPath).size;
+
+  if (!size || size < 100000) {
+    throw new Error("Audio inválido");
+  }
+
+  if (size > MAX_AUDIO_BYTES) {
+    throw new Error("Audio demasiado grande");
+  }
+
+  const detectedName = parseContentDispositionFileName(
+    response.headers?.["content-disposition"]
+  );
+  const sniffed = detectAudioFromFile(outputPath);
+  const audioMeta = buildAudioMeta(
+    detectedName || suggestedFileName || path.basename(outputPath),
+    response.headers?.["content-type"],
+    "audio",
+    sniffed
+  );
+
+  return {
+    path: outputPath,
+    size,
+    fileName: audioMeta.fileName,
+    mimetype: audioMeta.mimetype,
+    isMp3: audioMeta.isMp3,
+  };
+}
+
 async function downloadAudioFromApi(videoUrl, outputPath) {
   const response = await axios.get(API_AUDIO_URL, {
     responseType: "stream",
@@ -251,10 +442,12 @@ async function downloadAudioFromApi(videoUrl, outputPath) {
   const detectedName = parseContentDispositionFileName(
     response.headers?.["content-disposition"]
   );
+  const sniffed = detectAudioFromFile(outputPath);
   const audioMeta = buildAudioMeta(
     detectedName || path.basename(outputPath),
     response.headers?.["content-type"],
-    "audio"
+    "audio",
+    sniffed
   );
 
   return {
@@ -421,7 +614,27 @@ export default {
       finalMp3 = path.join(TMP_DIR, `${stamp}-audio.mp3`);
 
       const finalTitle = safeFileName(title || "audio");
-      const downloadedAudio = await downloadAudioFromApi(videoUrl, sourceFile);
+      let downloadedAudio = null;
+
+      try {
+        const fastestLink = await resolveFastestAudioLink(videoUrl);
+        title = safeFileName(fastestLink.title || finalTitle || "audio");
+
+        console.log(
+          `YTMP3 link ganador: ${fastestLink.sourceLabel} -> ${fastestLink.downloadUrl}`
+        );
+
+        downloadedAudio = await downloadAudioFromInternalLink(
+          fastestLink.downloadUrl,
+          sourceFile,
+          fastestLink.fileName || `${title}.bin`
+        );
+      } catch (linkError) {
+        console.log(
+          `YTMP3 link fallback: ${linkError?.message || linkError}`
+        );
+        downloadedAudio = await downloadAudioFromApi(videoUrl, sourceFile);
+      }
 
       let filePathToSend = downloadedAudio.path;
       let fileNameToSend = downloadedAudio.fileName;
@@ -431,7 +644,7 @@ export default {
         try {
           await convertToMp3(sourceFile, finalMp3);
           filePathToSend = finalMp3;
-          fileNameToSend = `${finalTitle}.mp3`;
+          fileNameToSend = `${title}.mp3`;
           mimeToSend = "audio/mpeg";
         } catch (convertError) {
           console.warn(
@@ -445,7 +658,7 @@ export default {
         filePath: filePathToSend,
         fileName: fileNameToSend,
         mimetype: mimeToSend,
-        title: finalTitle,
+        title,
       });
     } catch (err) {
       console.error("YTMP3 ERROR:", err?.message || err);
