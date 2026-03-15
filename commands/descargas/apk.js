@@ -1,49 +1,56 @@
-import fs from "fs";
 import path from "path";
-import os from "os";
-import axios from "axios";
-import { pipeline } from "stream/promises";
+import {
+  API_BASE,
+  apiGet,
+  deleteFileSafe,
+  downloadAbsoluteFile,
+  ensureApiKeyConfigured,
+  ensureTmpDir,
+  getCooldownRemaining,
+  isSupportedAppUrl,
+  mimeFromFileName,
+  normalizeApiUrl,
+  normalizePackageFileName,
+  pickApiDownloadUrl,
+  resolveUserInput,
+  safeFileName,
+} from "./dvyerShared.js";
 
-const API_BASE = "https://dv-yer-api.online";
-const API_APK_URL = `${API_BASE}/apkdl`;
-
+const API_APK_SEARCH_URL = `${API_BASE}/apksearch`;
+const API_APK_DOWNLOAD_URL = `${API_BASE}/apkdl`;
 const COOLDOWN_TIME = 15 * 1000;
-const REQUEST_TIMEOUT = 180000;
-const MAX_FILE_BYTES = 800 * 1024 * 1024;
-const TMP_DIR = path.join(os.tmpdir(), "dvyer-apk");
+const MAX_FILE_BYTES = 200 * 1024 * 1024;
+const TMP_DIR = ensureTmpDir("apk");
+const PREFER_SEQUENCE = ["auto", "apk"];
 
 const cooldowns = new Map();
 
-if (!fs.existsSync(TMP_DIR)) {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function safeFileName(name) {
-  return (
-    String(name || "app")
-      .replace(/[\\/:*?"<>|]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 100) || "app"
-  );
-}
+function scoreCandidate(query, item) {
+  const left = normalizeText(query);
+  const title = normalizeText(item?.title || "");
+  const packageName = normalizeText(item?.package_name || "");
+  const downloadQuery = normalizeText(item?.download_query || "");
 
-function normalizePackageFileName(name, format) {
-  const raw = String(name || "").trim();
-  const ext =
-    /\.xapk$/i.test(raw) || String(format || "").toLowerCase() === "xapk"
-      ? "xapk"
-      : "apk";
-
-  const base = safeFileName(raw.replace(/\.(apk|xapk)$/i, "") || "app");
-  return `${base}.${ext}`;
-}
-
-function mimeFromFileName(fileName) {
-  const lower = String(fileName || "").toLowerCase();
-  if (lower.endsWith(".xapk")) return "application/xapk-package-archive";
-  if (lower.endsWith(".apk")) return "application/vnd.android.package-archive";
-  return "application/octet-stream";
+  let score = 0;
+  if (title === left) score += 300;
+  if (packageName === left) score += 260;
+  if (downloadQuery === left) score += 240;
+  if (title.startsWith(left)) score += 120;
+  if (packageName.startsWith(left)) score += 100;
+  if (title.includes(left)) score += 80;
+  if (packageName.includes(left)) score += 70;
+  if (downloadQuery.includes(left)) score += 60;
+  return score;
 }
 
 function humanBytes(bytes) {
@@ -62,281 +69,95 @@ function humanBytes(bytes) {
   return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
-function getCooldownRemaining(untilMs) {
-  return Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
-}
-
-function extractTextFromMessage(message) {
-  return (
-    message?.text ||
-    message?.caption ||
-    message?.body ||
-    message?.message?.conversation ||
-    message?.message?.extendedTextMessage?.text ||
-    message?.message?.imageMessage?.caption ||
-    message?.message?.videoMessage?.caption ||
-    message?.message?.documentMessage?.caption ||
-    message?.conversation ||
-    message?.extendedTextMessage?.text ||
-    message?.imageMessage?.caption ||
-    message?.videoMessage?.caption ||
-    message?.documentMessage?.caption ||
-    ""
+async function searchBestApp(query) {
+  const data = await apiGet(
+    API_APK_SEARCH_URL,
+    { q: query, limit: 5, lang: "es" },
+    45000
   );
-}
 
-function getQuotedMessage(ctx, msg) {
-  return (
-    ctx?.quoted ||
-    msg?.quoted ||
-    msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage ||
-    null
-  );
-}
-
-function resolveRawInput(ctx) {
-  const msg = ctx.m || ctx.msg || null;
-  const argsText = Array.isArray(ctx.args) ? ctx.args.join(" ").trim() : "";
-  const quotedMessage = getQuotedMessage(ctx, msg);
-  const quotedText = extractTextFromMessage(quotedMessage);
-  return argsText || quotedText || "";
-}
-
-function parsePreferenceAndTarget(rawInput) {
-  const text = String(rawInput || "").trim();
-  if (!text) {
-    return { prefer: "apk", target: "" };
+  const results = Array.isArray(data?.results) ? data.results : [];
+  if (!results.length) {
+    throw new Error("No se encontraron resultados de apps.");
   }
 
-  const parts = text.split(/\s+/);
-  const first = String(parts[0] || "").toLowerCase();
-
-  if (["apk", "xapk", "auto"].includes(first)) {
-    return {
-      prefer: first,
-      target: parts.slice(1).join(" ").trim(),
-    };
-  }
+  const best = [...results].sort((a, b) => scoreCandidate(query, b) - scoreCandidate(query, a))[0];
 
   return {
-    prefer: "apk",
-    target: text,
+    title: safeFileName(best?.title || "app"),
+    packageName: best?.package_name || null,
+    version: best?.version || null,
+    versionCode: best?.version_code || null,
+    filesizeBytes: best?.filesize_bytes || null,
+    icon: best?.icon || null,
+    downloadQuery: String(best?.download_query || best?.title || query).trim(),
   };
 }
 
-function isHttpUrl(value) {
-  return /^https?:\/\//i.test(String(value || "").trim());
-}
-
-function buildApiParams(input, mode, prefer) {
+async function requestApkMeta(input, prefer) {
   const params = {
-    mode,
-    prefer: prefer || "apk",
+    mode: "link",
+    prefer,
     lang: "es",
   };
 
-  if (isHttpUrl(input)) params.url = input;
+  if (isSupportedAppUrl(input)) params.url = input;
   else params.q = input;
 
-  return params;
-}
+  const data = await apiGet(API_APK_DOWNLOAD_URL, params, 45000);
+  const downloadUrl = normalizeApiUrl(pickApiDownloadUrl(data));
 
-function extractApiError(data, status) {
-  return (
-    data?.detail ||
-    data?.error?.message ||
-    data?.message ||
-    (status ? `HTTP ${status}` : "Error de API")
-  );
-}
-
-function parseContentDispositionFileName(headerValue) {
-  const text = String(headerValue || "");
-  const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
-
-  if (utfMatch?.[1]) {
-    try {
-      return decodeURIComponent(utfMatch[1]).replace(/["']/g, "").trim();
-    } catch {}
+  if (!downloadUrl) {
+    throw new Error("La API no devolvio enlace interno de descarga.");
   }
-
-  const normalMatch = text.match(/filename="?([^"]+)"?/i);
-  if (normalMatch?.[1]) {
-    return normalMatch[1].trim();
-  }
-
-  return "";
-}
-
-function deleteFileSafe(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch {}
-}
-
-async function readStreamToText(stream) {
-  return await new Promise((resolve, reject) => {
-    let data = "";
-
-    stream.on("data", (chunk) => {
-      data += chunk.toString();
-    });
-
-    stream.on("end", () => resolve(data));
-    stream.on("error", reject);
-  });
-}
-
-async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
-  const response = await axios.get(url, {
-    timeout,
-    params,
-    validateStatus: () => true,
-  });
-
-  const data = response.data;
-
-  if (response.status >= 400) {
-    throw new Error(extractApiError(data, response.status));
-  }
-
-  if (data?.ok === false || data?.status === false) {
-    throw new Error(extractApiError(data, response.status));
-  }
-
-  return data;
-}
-
-async function requestAppInfo(input, prefer) {
-  const data = await apiGet(API_APK_URL, buildApiParams(input, "link", prefer));
 
   return {
     title: safeFileName(data?.title || data?.package_name || "app"),
     fileName: normalizePackageFileName(
       data?.filename || "app.apk",
-      data?.download_type || data?.format || "apk"
+      data?.format || data?.download_type || "apk"
     ),
     packageName: data?.package_name || null,
     version: data?.version || null,
-    format: String(data?.download_type || data?.format || "apk").toLowerCase() || "apk",
+    versionCode: data?.version_code || null,
+    format: String(data?.format || data?.download_type || "apk").toLowerCase() || "apk",
     icon: data?.icon || null,
     description: String(data?.description || "").trim() || null,
-    publishedAt: data?.published_at || null,
-    requirements: data?.requirements || null,
-    architecture: data?.architecture || null,
     filesizeBytes: data?.filesize_bytes || null,
+    downloadUrl,
   };
 }
 
-async function downloadAppFile(input, prefer, outputPath, suggestedFileName, format) {
-  const response = await axios.get(API_APK_URL, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    params: buildApiParams(input, "file", prefer),
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-      Accept: "*/*",
-      Referer: `${API_BASE}/`,
-    },
-    validateStatus: () => true,
-    maxRedirects: 5,
-  });
+async function requestApkMetaWithFallback(input) {
+  let lastError = "No se pudo resolver la app.";
 
-  if (response.status >= 400) {
-    const errorText = await readStreamToText(response.data).catch(() => "");
-    throw new Error(
-      extractApiError(
-        { message: errorText || "No se pudo descargar el archivo." },
-        response.status
-      )
-    );
-  }
-
-  const contentLength = Number(response.headers?.["content-length"] || 0);
-  if (contentLength && contentLength > MAX_FILE_BYTES) {
-    throw new Error("El archivo es demasiado grande para enviarlo por WhatsApp.");
-  }
-
-  let downloaded = 0;
-
-  response.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (downloaded > MAX_FILE_BYTES) {
-      response.data.destroy(new Error("El archivo es demasiado grande para enviarlo por WhatsApp."));
+  for (const prefer of PREFER_SEQUENCE) {
+    try {
+      return await requestApkMeta(input, prefer);
+    } catch (error) {
+      lastError = error?.message || "Error desconocido";
     }
-  });
-
-  try {
-    await pipeline(response.data, fs.createWriteStream(outputPath));
-  } catch (error) {
-    deleteFileSafe(outputPath);
-    throw error;
   }
 
-  if (!fs.existsSync(outputPath)) {
-    throw new Error("No se pudo guardar el archivo.");
-  }
-
-  const size = fs.statSync(outputPath).size;
-  if (!size || size < 50000) {
-    deleteFileSafe(outputPath);
-    throw new Error("El archivo descargado es inválido.");
-  }
-
-  if (size > MAX_FILE_BYTES) {
-    deleteFileSafe(outputPath);
-    throw new Error("El archivo es demasiado grande para enviarlo por WhatsApp.");
-  }
-
-  const detectedName = parseContentDispositionFileName(
-    response.headers?.["content-disposition"]
-  );
-
-  const finalFileName = normalizePackageFileName(
-    detectedName || suggestedFileName || "app.apk",
-    format || "apk"
-  );
-
-  return {
-    tempPath: outputPath,
-    size,
-    fileName: finalFileName,
-    mime: mimeFromFileName(finalFileName),
-  };
+  throw new Error(lastError);
 }
 
-function buildPreviewCaption(info, prefer) {
-  const lines = [
-    "api dvyer",
-    "",
-    `📦 ${info.title || "App"}`,
-  ];
-
-  if (prefer) lines.push(`🎯 Pedido: ${String(prefer).toUpperCase()}`);
-  if (info.format) lines.push(`📁 Formato: ${String(info.format).toUpperCase()}`);
-  if (info.version) lines.push(`🏷️ Version: ${info.version}`);
-  if (info.packageName) lines.push(`📦 Paquete: ${info.packageName}`);
-
-  const size = humanBytes(info.filesizeBytes);
-  if (size) lines.push(`💾 Tamaño: ${size}`);
-
-  if (info.publishedAt) lines.push(`📅 Actualizado: ${info.publishedAt}`);
-  if (info.requirements) lines.push(`📱 SO: ${info.requirements}`);
-  if (info.architecture) lines.push(`🧩 Arquitectura: ${info.architecture}`);
-
+function buildPreviewCaption(info) {
+  const lines = ["DVYER API", "", `App: ${info.title || "App"}`];
+  if (info.version) lines.push(`Version: ${info.version}`);
+  if (info.packageName) lines.push(`Paquete: ${info.packageName}`);
+  if (info.format) lines.push(`Formato: ${String(info.format).toUpperCase()}`);
+  const sizeText = humanBytes(info.filesizeBytes);
+  if (sizeText) lines.push(`Tamano: ${sizeText}`);
   if (info.description) {
     lines.push("");
-    lines.push(info.description.length > 260 ? `${info.description.slice(0, 257)}...` : info.description);
+    lines.push(String(info.description).replace(/\s+/g, " ").trim().slice(0, 260));
   }
-
   return lines.join("\n");
 }
 
-async function sendPreview(sock, from, quoted, info, prefer) {
-  const caption = buildPreviewCaption(info, prefer);
+async function sendPreviewCard(sock, from, quoted, info) {
+  const caption = buildPreviewCaption(info);
 
   if (info.icon) {
     await sock.sendMessage(
@@ -361,15 +182,14 @@ async function sendPreview(sock, from, quoted, info, prefer) {
   );
 }
 
-async function sendPackageDocument(sock, from, quoted, options) {
-  const { filePath, fileName, mime, title, version, packageName, format, size } = options;
-
+async function sendApkDocument(sock, from, quoted, payload) {
+  const { filePath, fileName, mime, title, packageName, version, size, format } = payload;
   const extra = [];
-  if (packageName) extra.push(`📦 ${packageName}`);
-  if (version) extra.push(`🏷️ ${version}`);
-  if (format) extra.push(`📁 ${String(format).toUpperCase()}`);
-  const humanSizeValue = humanBytes(size);
-  if (humanSizeValue) extra.push(`💾 ${humanSizeValue}`);
+  if (packageName) extra.push(`Paquete: ${packageName}`);
+  if (version) extra.push(`Version: ${version}`);
+  if (format) extra.push(`Formato: ${String(format).toUpperCase()}`);
+  const sizeText = humanBytes(size);
+  if (sizeText) extra.push(`Tamano: ${sizeText}`);
 
   await sock.sendMessage(
     from,
@@ -377,7 +197,7 @@ async function sendPackageDocument(sock, from, quoted, options) {
       document: { url: filePath },
       mimetype: mime,
       fileName,
-      caption: `api dvyer\n\n📦 ${title}${extra.length ? `\n${extra.join("\n")}` : ""}`,
+      caption: `DVYER API\n\nApp: ${title}${extra.length ? `\n${extra.join("\n")}` : ""}`,
       ...global.channelInfo,
     },
     quoted
@@ -399,7 +219,7 @@ export default {
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
       return sock.sendMessage(from, {
-        text: `⏳ Espera ${getCooldownRemaining(until)}s`,
+        text: `Espera ${getCooldownRemaining(until)}s`,
         ...global.channelInfo,
       });
     }
@@ -407,15 +227,13 @@ export default {
     cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
 
     try {
-      const rawInput = resolveRawInput(ctx);
-      const parsed = parsePreferenceAndTarget(rawInput);
-      const prefer = parsed.prefer;
-      const target = parsed.target;
+      ensureApiKeyConfigured();
 
-      if (!target) {
+      const userInput = resolveUserInput(ctx);
+      if (!userInput) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .apk <nombre o url>\n❌ Uso: .apk xapk <nombre o url>\n❌ Uso: .apk auto <nombre o url>",
+          text: "Uso: .apk <nombre de app o url>",
           ...global.channelInfo,
         });
       }
@@ -423,45 +241,59 @@ export default {
       await sock.sendMessage(
         from,
         {
-          text: `📦 Buscando app...\n\n🌐 ${API_BASE}\n🔎 ${target}\n🎯 Preferencia: ${prefer.toUpperCase()}`,
+          text: `Buscando app...\n\nAPI: ${API_BASE}\nConsulta: ${userInput}`,
           ...global.channelInfo,
         },
         quoted
       );
 
-      const info = await requestAppInfo(target, prefer);
+      let searchInfo = null;
+      let resolvedInput = userInput;
 
-      await sendPreview(sock, from, quoted, info, prefer);
+      if (!isSupportedAppUrl(userInput)) {
+        searchInfo = await searchBestApp(userInput);
+        resolvedInput = searchInfo.downloadQuery || searchInfo.title || userInput;
+      }
+
+      const info = await requestApkMetaWithFallback(resolvedInput);
+
+      await sendPreviewCard(sock, from, quoted, {
+        title: info.title || searchInfo?.title,
+        packageName: info.packageName || searchInfo?.packageName,
+        version: info.version || searchInfo?.version,
+        format: info.format,
+        filesizeBytes: info.filesizeBytes || searchInfo?.filesizeBytes,
+        icon: info.icon || searchInfo?.icon,
+        description: info.description,
+      });
 
       tempPath = path.join(
         TMP_DIR,
         `${Date.now()}-${normalizePackageFileName(info.fileName, info.format)}`
       );
 
-      const downloaded = await downloadAppFile(
-        target,
-        prefer,
-        tempPath,
-        info.fileName,
-        info.format
-      );
-
-      await sendPackageDocument(sock, from, quoted, {
-        filePath: downloaded.tempPath,
-        fileName: downloaded.fileName,
-        mime: downloaded.mime,
-        title: info.title,
-        version: info.version,
-        packageName: info.packageName,
-        format: info.format,
-        size: downloaded.size,
+      const downloaded = await downloadAbsoluteFile(info.downloadUrl, {
+        outputPath: tempPath,
+        maxBytes: MAX_FILE_BYTES,
+        minBytes: 50000,
       });
-    } catch (err) {
-      console.error("APK ERROR:", err?.message || err);
+
+      await sendApkDocument(sock, from, quoted, {
+        filePath: downloaded.tempPath,
+        fileName: normalizePackageFileName(downloaded.fileName || info.fileName, info.format),
+        mime: mimeFromFileName(downloaded.fileName || info.fileName),
+        title: info.title,
+        packageName: info.packageName,
+        version: info.version,
+        size: downloaded.size,
+        format: info.format,
+      });
+    } catch (error) {
+      console.error("APK ERROR:", error?.message || error);
       cooldowns.delete(userId);
 
       await sock.sendMessage(from, {
-        text: `❌ ${String(err?.message || "No se pudo procesar la app.")}`,
+        text: String(error?.message || "No se pudo procesar la app."),
         ...global.channelInfo,
       });
     } finally {
@@ -469,4 +301,3 @@ export default {
     }
   },
 };
-
