@@ -1493,6 +1493,26 @@ async function runGroupUpdateHooks(botState, sock, update) {
   }
 }
 
+async function runMessageDeleteHooks(botState, sock, payload) {
+  for (const cmd of commandModules) {
+    if (typeof cmd?.onMessageDelete !== "function") continue;
+
+    try {
+      await cmd.onMessageDelete({
+        sock,
+        settings,
+        comandos,
+        botId: botState.config.id,
+        botLabel: botState.config.label,
+        botName: botState.config.displayName,
+        ...payload,
+      });
+    } catch (err) {
+      console.error(`${getBotTag(botState)} Error onMessageDelete:`, err);
+    }
+  }
+}
+
 async function canRunCommand(cmd, context) {
   const quoted = getQuoteOptions(context.msg);
 
@@ -2992,6 +3012,42 @@ async function iniciarInstanciaBot(config) {
 
     sock.ev.on("messages.upsert", async ({ messages }) => {
       await handleIncomingMessages(botState, sock, messages);
+    });
+
+    sock.ev.on("messages.delete", async (update) => {
+      const keys = Array.isArray(update?.keys) ? update.keys : [];
+
+      for (const key of keys) {
+        try {
+          const remoteJid = String(key?.remoteJid || "").trim();
+          if (!remoteJid) continue;
+
+          let deletedMessage = null;
+
+          try {
+            if (botState.store?.loadMessage && key?.id) {
+              const stored = await botState.store.loadMessage(remoteJid, key.id);
+              const normalizedMessage = stored?.message || stored;
+              if (normalizedMessage) {
+                deletedMessage = serializeMessage({
+                  key,
+                  message: normalizedMessage,
+                });
+              }
+            }
+          } catch {}
+
+          await runMessageDeleteHooks(botState, sock, {
+            update,
+            deleteKey: key,
+            from: remoteJid,
+            deletedMessage,
+            isGroup: remoteJid.endsWith("@g.us"),
+          });
+        } catch (err) {
+          console.error(`${getBotTag(botState)} Error procesando message delete:`, err);
+        }
+      }
     });
   } catch (err) {
     console.error(`${getBotTag(config)} Error iniciando bot:`, err);

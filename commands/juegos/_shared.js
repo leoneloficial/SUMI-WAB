@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { awardGameCoins } from "../economia/_shared.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const STATS_FILE = path.join(DB_DIR, "games-stats.json");
@@ -286,6 +287,13 @@ export function recordGameResult({
   if (groupGameProfile) applyOutcome(groupGameProfile);
 
   profile.lastPlayedAt = now;
+  awardGameCoins({
+    userId,
+    chatId,
+    game,
+    outcome: normalizedOutcome,
+    points,
+  });
   scheduleStatsSave();
   return { profile, gameProfile, groupProfile, groupGameProfile };
 }
