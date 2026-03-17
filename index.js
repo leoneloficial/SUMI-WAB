@@ -1634,6 +1634,28 @@ function summarizeBotConfig(config) {
   };
 }
 
+function hasPersistedBotSession(config = {}) {
+  const authFolder = String(config?.authFolder || "").trim();
+  if (!authFolder) return false;
+
+  const credsPath = path.join(authFolder, "creds.json");
+  if (!fs.existsSync(credsPath)) return false;
+
+  try {
+    const raw = fs.readFileSync(credsPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return Boolean(parsed?.registered || parsed?.me?.id);
+  } catch {
+    return false;
+  }
+}
+
+function shouldStartSecondaryBot(config = {}) {
+  if (!config || config.id === "main") return false;
+  if (config.enabled === false) return false;
+  return hasPersistedBotSession(config);
+}
+
 function shouldPromptInConsole(botState) {
   return botState?.config?.id === "main";
 }
@@ -1804,6 +1826,7 @@ async function requestPairingCode(botState, options = {}) {
 async function startSecondaryBots() {
   for (const config of BOT_CONFIGS) {
     if (config.id === "main") continue;
+    if (!shouldStartSecondaryBot(config)) continue;
     await iniciarInstanciaBot(config);
   }
 }
