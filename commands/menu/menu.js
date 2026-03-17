@@ -31,6 +31,68 @@ function getPrefixLabel(settings) {
   return String(settings?.prefix || ".").trim() || ".";
 }
 
+function normalizeCategoryLabel(value = "") {
+  return String(value || "")
+    .replace(/_/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function getCategoryIcon(category = "") {
+  const key = String(category || "").trim().toLowerCase();
+  const icons = {
+    admin: "👑",
+    ai: "🧠",
+    anime: "🌸",
+    busqueda: "🔎",
+    descarga: "📥",
+    descargas: "📥",
+    economia: "💰",
+    grupo: "🛡️",
+    juegos: "🎮",
+    menu: "📜",
+    sistema: "⚙️",
+    subbots: "🤖",
+    vip: "💎",
+  };
+
+  return icons[key] || "✦";
+}
+
+function buildTopPanel({ settings, uptime, totalCategories, totalCommands, prefixLabel }) {
+  return [
+    "╭━━━〔 𝙈𝙀𝙉𝙐 𝙋𝙍𝙄𝙉𝘾𝙄𝙋𝘼𝙇 〕━━━⬣",
+    `┃ ✦ Bot: *${settings.botName || "BOT"}*`,
+    `┃ ✦ Owner: *${settings.ownerName || "Owner"}*`,
+    `┃ ✦ Prefijos: *${prefixLabel}*`,
+    `┃ ✦ Uptime: *${uptime}*`,
+    `┃ ✦ Categorias: *${totalCategories}*`,
+    `┃ ✦ Comandos: *${totalCommands}*`,
+    "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
+  ].join("\n");
+}
+
+function buildCategoryBlock(category, commands, primaryPrefix) {
+  const icon = getCategoryIcon(category);
+  const title = normalizeCategoryLabel(category);
+  const lines = [
+    `╭─〔 ${icon} ${title} 〕`,
+    ...commands.map((name) => `│ • \`${primaryPrefix}${name}\``),
+    "╰────────────⬣",
+  ];
+
+  return lines.join("\n");
+}
+
+function buildFooter(primaryPrefix) {
+  return [
+    "╭─〔 𝙉𝙊𝙏𝘼𝙎 〕",
+    `│ • Usa \`${primaryPrefix}status\` para ver el estado del bot`,
+    `│ • Usa \`${primaryPrefix}owner\` si necesitas soporte directo`,
+    "╰────────────⬣",
+  ].join("\n");
+}
+
 export default {
   command: ["menu"],
   category: "menu",
@@ -65,49 +127,31 @@ export default {
 
         const cat = String(cmd.category).toLowerCase();
         const principal = cmd.name || (Array.isArray(cmd.command) ? cmd.command[0] : cmd.command);
-
         if (!principal) continue;
 
         if (!categorias[cat]) categorias[cat] = new Set();
         categorias[cat].add(String(principal).toLowerCase());
       }
 
-      let menu = `
-╭══════════════════════╮
-│ ✦ *${settings.botName}* ✦
-╰══════════════════════╯
+      const categoryNames = Object.keys(categorias).sort();
+      const totalCommands = categoryNames.reduce(
+        (sum, category) => sum + Array.from(categorias[category]).length,
+        0
+      );
 
-▸ _prefijos_ : *${prefixLabel}*
-▸ _estado_   : *online*
-▸ _uptime_   : *${uptime}*
-
-┌──────────────────────┐
-│ ✧ *MENU DE COMANDOS* ✧
-└──────────────────────┘
-`;
-
-      for (const cat of Object.keys(categorias).sort()) {
-        const lista = Array.from(categorias[cat]).sort();
-
-        menu += `
-╭─ ❖ *${cat.toUpperCase()}*
-│`;
-
-        for (const c of lista) {
-          menu += `\n│  • \`${primaryPrefix}${c}\``;
-        }
-
-        menu += `
-╰──────────────────────`;
-      }
-
-      menu += `
-
-┌──────────────────────┐
-│ ✦ _bot premium activo_
-└──────────────────────┘
-_artoria bot vip_
-`;
+      const parts = [
+        buildTopPanel({
+          settings,
+          uptime,
+          totalCategories: categoryNames.length,
+          totalCommands,
+          prefixLabel,
+        }),
+        ...categoryNames.map((category) =>
+          buildCategoryBlock(category, Array.from(categorias[category]).sort(), primaryPrefix)
+        ),
+        buildFooter(primaryPrefix),
+      ];
 
       await sock.sendMessage(
         from,
@@ -115,7 +159,7 @@ _artoria bot vip_
           video: fs.readFileSync(videoPath),
           mimetype: "video/mp4",
           gifPlayback: true,
-          caption: menu.trim(),
+          caption: parts.join("\n\n").trim(),
           ...global.channelInfo,
         },
         { quoted: msg }

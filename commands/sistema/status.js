@@ -3,24 +3,10 @@ import path from "path";
 
 function safeJsonParse(raw) {
   try {
-    const a = JSON.parse(raw);
-    // en tu repo hay JSONs que quedaron como string "[]"
-    if (typeof a === "string") return JSON.parse(a);
-    return a;
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? JSON.parse(parsed) : parsed;
   } catch {
     return null;
-  }
-}
-
-function readSetFromFile(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) return new Set();
-    const raw = fs.readFileSync(filePath, "utf-8");
-    const data = safeJsonParse(raw);
-    if (Array.isArray(data)) return new Set(data);
-    return new Set();
-  } catch {
-    return new Set();
   }
 }
 
@@ -37,11 +23,79 @@ function getPrefixLabel(settings) {
   const p = settings?.prefix;
 
   if (noPrefix) return "SIN PREFIJO";
-
   if (Array.isArray(p) && p.length) return p.join(" | ");
   if (typeof p === "string" && p.trim()) return p.trim();
-
   return "SIN PREFIJO";
+}
+
+function readFileState(filePath, groupId, fallback = false) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const data = safeJsonParse(raw);
+
+    if (Array.isArray(data)) {
+      return data.includes(groupId);
+    }
+
+    if (data && typeof data === "object") {
+      const entry = data[groupId];
+      if (typeof entry === "boolean") return entry;
+      if (entry && typeof entry === "object" && "enabled" in entry) {
+        return entry.enabled === true;
+      }
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function countVipUsers() {
+  const vipFile = path.join(process.cwd(), "settings", "vip.json");
+  try {
+    if (!fs.existsSync(vipFile)) return 0;
+    const raw = fs.readFileSync(vipFile, "utf-8");
+    const data = safeJsonParse(raw) || {};
+    const users = data.users && typeof data.users === "object" ? data.users : {};
+    return Object.keys(users).length;
+  } catch {
+    return 0;
+  }
+}
+
+function getSubbotLabel() {
+  const bots = global.botRuntime?.listBots?.({ includeMain: true }) || [];
+  const connected = bots.filter((bot) => bot.connected).length;
+  const total = bots.length;
+  return `${connected}/${total}`;
+}
+
+function buildMainPanel({ settings, comandos, vipCount }) {
+  return [
+    "╭━━━〔 𝙀𝙎𝙏𝘼𝘿𝙊 𝘿𝙀𝙇 𝘽𝙊𝙏 〕━━━⬣",
+    `┃ ⚙️ Bot: *${settings.botName || "BOT"}*`,
+    `┃ 👑 Owner: *${settings.ownerName || "Owner"}*`,
+    `┃ ⏱️ Uptime: *${formatUptime(process.uptime())}*`,
+    `┃ ✦ Prefijos: *${getPrefixLabel(settings)}*`,
+    `┃ 🧩 Comandos: *${comandos?.size ?? "?"}*`,
+    `┃ 🤖 Bots conectados: *${getSubbotLabel()}*`,
+    `┃ 💎 VIP activos: *${vipCount}*`,
+    `┃ 📰 Newsletter: *${settings?.newsletter?.enabled ? "ON" : "OFF"}*`,
+    "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
+  ].join("\n");
+}
+
+function buildGroupPanel({ welcomeOn, modoAdmiOn, antilinkOn, antifakeOn }) {
+  return [
+    "╭─〔 🛡️ 𝙂𝙍𝙐𝙋𝙊 〕",
+    `│ 🌸 Welcome: *${welcomeOn ? "ON" : "OFF"}*`,
+    `│ 👮 ModoAdmin: *${modoAdmiOn ? "ON" : "OFF"}*`,
+    `│ 🔗 Antilink: *${antilinkOn ? "ON" : "OFF"}*`,
+    `│ 🚫 Antifake: *${antifakeOn ? "ON" : "OFF"}*`,
+    "╰────────────⬣",
+  ].join("\n");
 }
 
 export default {
@@ -51,59 +105,31 @@ export default {
   description: "Panel de estado del bot",
 
   run: async ({ sock, msg, from, settings, comandos, esGrupo }) => {
-    const DB_DIR = path.join(process.cwd(), "database");
-    const welcomeFile = path.join(DB_DIR, "welcome.json");
-    const modoAdmiFile = path.join(DB_DIR, "modoadmi.json");
-    const antilinkFile = path.join(DB_DIR, "antilink.json"); // (solo si aplicas el parche opcional)
+    const dbDir = path.join(process.cwd(), "database");
+    const welcomeOn = readFileState(path.join(dbDir, "welcome.json"), from, false);
+    const modoAdmiOn = readFileState(path.join(dbDir, "modoadmi.json"), from, false);
+    const antilinkOn = readFileState(path.join(dbDir, "antilink.json"), from, false);
+    const antifakeOn = readFileState(path.join(dbDir, "antifake.json"), from, false);
+    const vipCount = countVipUsers();
 
-    const welcomeSet = readSetFromFile(welcomeFile);
-    const modoAdmiSet = readSetFromFile(modoAdmiFile);
-    const antilinkSet = readSetFromFile(antilinkFile);
-
-    const welcomeOn = welcomeSet.has(from);
-    const modoAdmiOn = modoAdmiSet.has(from);
-
-    // antilink: si no existe archivo, tu bot lo usa temporal → mostramos "TEMP"
-    const antilinkExists = fs.existsSync(antilinkFile);
-    const antilinkLabel = antilinkExists
-      ? (antilinkSet.has(from) ? "ON ✅" : "OFF ❌")
-      : "TEMP ♻️ (se reinicia)";
-
-    // VIP users
-    const vipFile = path.join(process.cwd(), "settings", "vip.json");
-    let vipCount = 0;
-    try {
-      if (fs.existsSync(vipFile)) {
-        const raw = fs.readFileSync(vipFile, "utf-8");
-        const data = safeJsonParse(raw) || {};
-        const users = data.users && typeof data.users === "object" ? data.users : {};
-        vipCount = Object.keys(users).length;
-      }
-    } catch {}
-
-    const prefixLabel = getPrefixLabel(settings);
-    const newsletterOn = !!settings?.newsletter?.enabled;
-
-    const texto =
-`📊 *STATUS - ${settings.botName || "BOT"}*
-
-⚙️ *Prefijo:* ${prefixLabel}
-📰 *Newsletter:* ${newsletterOn ? "ON ✅" : "OFF ❌"}
-🧩 *Comandos cargados:* ${comandos?.size ?? "?"}
-⏱️ *Uptime:* ${formatUptime(process.uptime())}
-👑 *Owner:* ${settings.ownerName || "Owner"}
-💎 *VIP users:* ${vipCount}
-
-${esGrupo ? `👥 *Grupo:*
-• Welcome: ${welcomeOn ? "ON ✅" : "OFF ❌"}
-• ModoAdmin: ${modoAdmiOn ? "ON ✅" : "OFF ❌"}
-• Antilink: ${antilinkLabel}` : "📩 *Chat privado:* (config de grupo no aplica)"}`
-;
+    const sections = [
+      buildMainPanel({ settings, comandos, vipCount }),
+      esGrupo
+        ? buildGroupPanel({ welcomeOn, modoAdmiOn, antilinkOn, antifakeOn })
+        : [
+            "╭─〔 💬 𝙋𝙍𝙄𝙑𝘼𝘿𝙊 〕",
+            "│ Este panel fue abierto desde un chat privado.",
+            "╰────────────⬣",
+          ].join("\n"),
+    ];
 
     return sock.sendMessage(
       from,
-      { text: texto, ...global.channelInfo },
+      {
+        text: sections.join("\n\n"),
+        ...global.channelInfo,
+      },
       { quoted: msg }
     );
-  }
+  },
 };
