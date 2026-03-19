@@ -7,8 +7,8 @@ import {
 } from "./_shared.js";
 
 export default {
-  name: "coins",
-  command: ["coins", "balance", "wallet", "cartera", "dolares", "saldo", "usd", "dinero"],
+  name: "dolares",
+  command: ["dolares", "saldo", "usd", "dinero", "coins", "balance", "wallet", "cartera", "misdolares"],
   category: "economia",
   description: "Muestra tus dolares, solicitudes e inventario",
 
@@ -26,6 +26,8 @@ export default {
       {
         text:
           `*ECONOMIA DE ${formatUserLabel(sender)}*\n\n` +
+          `Nombre: *${profile?.lastKnownName || "Sin nombre"}*\n` +
+          `Numero: *${profile?.phone ? `+${profile.phone}` : formatUserLabel(sender)}*\n` +
           `Dolares: *${formatCoins(profile?.coins || 0)}*\n` +
           `Banco: *${formatCoins(profile?.bank || 0)}*\n` +
           `Total actual: *${formatCoins(Number(profile?.coins || 0) + Number(profile?.bank || 0))}*\n` +

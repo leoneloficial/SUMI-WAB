@@ -3,7 +3,7 @@ import { formatDuration } from "../sistema/_shared.js";
 
 export default {
   name: "daily",
-  command: ["daily", "coinsdaily", "reclamarcoins", "reclamardolares"],
+  command: ["daily", "dailydolares", "reclamardolares", "reclamarcoins", "diario"],
   category: "economia",
   description: "Reclama tu recompensa diaria en dolares",
 
@@ -18,7 +18,7 @@ export default {
         text:
           `*DAILY EN COOLDOWN*\n\n` +
           `Podras reclamar de nuevo en *${formatDuration(result.remainingMs)}*.\n` +
-          `Mientras tanto revisa tu saldo con *${prefix}coins*.`,
+          `Mientras tanto revisa tu saldo con *${prefix}dolares*.`,
         ...global.channelInfo,
       },
         { quoted: msg }

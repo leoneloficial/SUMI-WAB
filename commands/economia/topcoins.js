@@ -1,8 +1,8 @@
 import { formatCoins, formatUserLabel, getTopCoins } from "./_shared.js";
 
 export default {
-  name: "topcoins",
-  command: ["topcoins", "coinstop", "rankcoins", "topdolares", "rankdolares"],
+  name: "topdolares",
+  command: ["topdolares", "rankdolares", "topcoins", "coinstop", "rankcoins", "rankdolaressemana"],
   category: "economia",
   description: "Muestra el ranking de dolares",
 

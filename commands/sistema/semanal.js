@@ -6,7 +6,7 @@ export default {
   name: "semanal",
   command: ["semanal", "weekly", "ranksemanal"],
   category: "sistema",
-  description: "Ranking semanal de comandos, juegos y coins",
+  description: "Ranking semanal de comandos, juegos y dolares",
 
   run: async ({ sock, msg, from, args = [] }) => {
     const mode = String(args[0] || "comandos").trim().toLowerCase();
@@ -14,11 +14,11 @@ export default {
 
     let body = "";
 
-    if (mode === "coins") {
+    if (mode === "coins" || mode === "dolares" || mode === "usd") {
       body =
-        `*TOP SEMANAL COINS*\n\n` +
+        `*TOP SEMANAL DOLARES*\n\n` +
         snapshot.topUsersByCoins
-          .map((item, index) => `${index + 1}. ${formatUserLabel(item.id)} - ${item.coins} coins`)
+          .map((item, index) => `${index + 1}. ${formatUserLabel(item.id)} - US$ ${item.coins}`)
           .join("\n");
     } else if (mode === "juegos") {
       body =

@@ -920,6 +920,7 @@ function serializeMessage(raw) {
     sender,
     chat: from,
     isGroup: from.endsWith("@g.us"),
+    pushName: String(raw?.pushName || raw?.notifyName || raw?.verifiedBizName || "").trim(),
     quoted,
   };
 }
@@ -3417,7 +3418,13 @@ async function handleIncomingMessages(botState, sock, messages) {
       if (blockedByHook) continue;
 
       if (!commandData) continue;
-      touchEconomyProfile(m.sender, settings);
+      touchEconomyProfile(m.sender, settings, {
+        jid: m.sender,
+        name: m.pushName,
+        chatId: from,
+        commandName: commandData.commandName,
+        botId: botState.config.id,
+      });
       failedCommandName = commandData.commandName;
 
       const cmd = comandos.get(commandData.commandName);

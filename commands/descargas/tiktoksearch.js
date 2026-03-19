@@ -1,4 +1,5 @@
 import { searchTikTokVideos } from "./_searchFallbacks.js";
+import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 function getPrefix(settings) {
   if (Array.isArray(settings?.prefix)) {
@@ -10,11 +11,12 @@ function getPrefix(settings) {
 
 export default {
   name: "ttsearch",
-  command: ["ttksearch", "tts", "tiktoksearch"],
+  command: ["ttsearch", "ttksearch", "tts", "tiktoksearch"],
   category: "descarga",
   description: "Busca videos de TikTok y envia 2 resultados",
 
-  run: async ({ sock, msg, from, args, settings }) => {
+  run: async (ctx) => {
+    const { sock, msg, from, args, settings } = ctx;
     const q = args.join(" ").trim();
     const prefix = getPrefix(settings);
 
@@ -29,6 +31,8 @@ export default {
       );
     }
 
+    let downloadCharge = null;
+
     try {
       const results = await searchTikTokVideos(q, 2);
 
@@ -41,6 +45,16 @@ export default {
           },
           { quoted: msg }
         );
+      }
+
+      downloadCharge = await chargeDownloadRequest(ctx, {
+        commandName: "tiktoksearch",
+        query: q,
+        totalResults: results.length,
+      });
+
+      if (!downloadCharge.ok) {
+        return null;
       }
 
       for (const item of results) {
@@ -59,6 +73,10 @@ export default {
       }
     } catch (error) {
       console.error("Error ejecutando ttsearch:", error?.message || error);
+      refundDownloadCharge(ctx, downloadCharge, {
+        commandName: "tiktoksearch",
+        reason: error?.message || "search_error",
+      });
 
       await sock.sendMessage(
         from,

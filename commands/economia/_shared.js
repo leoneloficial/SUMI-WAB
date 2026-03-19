@@ -162,6 +162,28 @@ function ensureUser(userId) {
   if (!String(user.registeredAt || "").trim()) {
     user.registeredAt = new Date().toISOString();
   }
+  if (!String(user.phone || "").trim()) {
+    user.phone = normalizedId.replace(/[^\d]/g, "");
+  }
+  if (!String(user.jid || "").trim()) {
+    user.jid = normalizedId ? `${normalizedId}@s.whatsapp.net` : "";
+  }
+  if (!String(user.lastKnownName || "").trim()) {
+    user.lastKnownName = "";
+  }
+  if (!String(user.lastChatId || "").trim()) {
+    user.lastChatId = "";
+  }
+  if (!String(user.lastBotId || "").trim()) {
+    user.lastBotId = "";
+  }
+  if (!String(user.lastCommand || "").trim()) {
+    user.lastCommand = "";
+  }
+  if (!String(user.lastSeenAt || "").trim()) {
+    user.lastSeenAt = "";
+  }
+  user.commandCount = clampInteger(user.commandCount, 0, 0, 10_000_000);
   if (!user.requests || typeof user.requests !== "object" || Array.isArray(user.requests)) {
     user.requests = {};
   }
@@ -236,13 +258,50 @@ function pushHistory(user, entry) {
   user.history = user.history.slice(0, 20);
 }
 
-export function touchEconomyProfile(userId, settings = {}) {
+function applyUserSnapshot(user, userId, meta = {}) {
+  if (!user) return;
+
+  const normalizedId = normalizeJidUser(userId);
+  user.phone = String(user.phone || normalizedId || "").replace(/[^\d]/g, "");
+  user.jid = String(meta?.jid || user.jid || (normalizedId ? `${normalizedId}@s.whatsapp.net` : "")).trim();
+
+  const nameCandidate = String(
+    meta?.name || meta?.pushName || meta?.notifyName || user.lastKnownName || ""
+  )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+
+  if (nameCandidate) {
+    user.lastKnownName = nameCandidate;
+  }
+
+  if (String(meta?.chatId || "").trim()) {
+    user.lastChatId = String(meta.chatId).trim();
+  }
+
+  if (String(meta?.botId || "").trim()) {
+    user.lastBotId = String(meta.botId).trim();
+  }
+
+  if (String(meta?.commandName || "").trim()) {
+    user.lastCommand = String(meta.commandName).trim().toLowerCase();
+    user.commandCount = clampInteger(Number(user.commandCount || 0) + 1, 0, 0, 10_000_000);
+  } else if (!Number.isFinite(Number(user.commandCount))) {
+    user.commandCount = 0;
+  }
+
+  user.lastSeenAt = new Date().toISOString();
+}
+
+export function touchEconomyProfile(userId, settings = {}, meta = {}) {
   const normalizedId = normalizeJidUser(userId);
   if (!normalizedId) return null;
 
   const existed = Boolean(state.users[normalizedId]);
   const user = ensureUser(normalizedId);
   ensureRequestState(user, settings);
+  applyUserSnapshot(user, userId, meta);
   scheduleSave();
   return {
     user,

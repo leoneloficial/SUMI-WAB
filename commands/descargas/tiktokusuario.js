@@ -1,4 +1,5 @@
 import { searchTikTokVideosByUser } from "./_searchFallbacks.js";
+import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 function getPrefix(settings) {
   if (Array.isArray(settings?.prefix)) {
@@ -14,7 +15,8 @@ export default {
   category: "descarga",
   description: "Busca videos de un usuario especifico en TikTok",
 
-  run: async ({ sock, msg, from, args, settings }) => {
+  run: async (ctx) => {
+    const { sock, msg, from, args, settings } = ctx;
     const username = args.join(" ").replace("@", "").trim().toLowerCase();
     const prefix = getPrefix(settings);
 
@@ -31,6 +33,8 @@ export default {
         { quoted: msg }
       );
     }
+
+    let downloadCharge = null;
 
     try {
       const results = await searchTikTokVideosByUser(username, 3);
@@ -55,6 +59,16 @@ export default {
         { quoted: msg }
       );
 
+      downloadCharge = await chargeDownloadRequest(ctx, {
+        commandName: "tiktokusuario",
+        username,
+        totalResults: results.length,
+      });
+
+      if (!downloadCharge.ok) {
+        return null;
+      }
+
       for (let index = 0; index < results.length; index += 1) {
         const item = results[index];
 
@@ -77,6 +91,10 @@ export default {
       }
     } catch (error) {
       console.error("Error ejecutando tiktokusuario:", error?.message || error);
+      refundDownloadCharge(ctx, downloadCharge, {
+        commandName: "tiktokusuario",
+        reason: error?.message || "user_search_error",
+      });
 
       await sock.sendMessage(
         from,

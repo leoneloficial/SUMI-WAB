@@ -13,6 +13,7 @@ import {
   setCoinsBalance,
   setDownloadRequests,
 } from "../economia/_shared.js";
+import { formatDateTime } from "../sistema/_shared.js";
 
 const SETTINGS_FILE = path.join(process.cwd(), "settings", "settings.json");
 
@@ -200,11 +201,18 @@ export default {
         {
           text:
             `*PERFIL ECONOMICO*\n\n` +
+            `Nombre: *${profile?.lastKnownName || "Sin nombre"}*\n` +
             `Usuario: *${target.replace("@s.whatsapp.net", "")}*\n` +
+            `JID: *${profile?.jid || target}*\n` +
             `Saldo: *${formatCoins(profile?.coins || 0)}*\n` +
             `Banco: *${formatCoins(profile?.bank || 0)}*\n` +
             `Solicitudes hoy: *${requests?.dailyRemaining || 0}/${requests?.dailyLimit || 0}*\n` +
-            `Solicitudes extra: *${requests?.extraRemaining || 0}*`,
+            `Solicitudes extra: *${requests?.extraRemaining || 0}*\n` +
+            `Comandos usados: *${profile?.commandCount || 0}*\n` +
+            `Ultimo comando: *${profile?.lastCommand || "Sin registro"}*\n` +
+            `Ultimo bot: *${profile?.lastBotId || "Sin registro"}*\n` +
+            `Registrado: *${formatDateTime(profile?.registeredAt)}*\n` +
+            `Ultima actividad: *${formatDateTime(profile?.lastSeenAt)}*`,
           ...global.channelInfo,
         },
         { quoted: msg }
@@ -220,15 +228,15 @@ export default {
         {
           text:
             `Usos:\n` +
-            `${prefix}economiaadmin mode on\n` +
+            `${prefix}economiaadmin on\n` +
             `${prefix}economiaadmin off\n` +
             `${prefix}economiaadmin daily 50\n` +
             `${prefix}economiaadmin price 25\n` +
-            `${prefix}economiaadmin addusd 519xxxxxxxx 500\n` +
-            `${prefix}economiaadmin removeusd 519xxxxxxxx 200\n` +
-            `${prefix}economiaadmin setusd 519xxxxxxxx 1000\n` +
-            `${prefix}economiaadmin addreq 519xxxxxxxx 20\n` +
-            `${prefix}economiaadmin removereq 519xxxxxxxx 5\n` +
+            `${prefix}economiaadmin adddolares 519xxxxxxxx 500\n` +
+            `${prefix}economiaadmin quitardolares 519xxxxxxxx 200\n` +
+            `${prefix}economiaadmin setdolares 519xxxxxxxx 1000\n` +
+            `${prefix}economiaadmin addsolicitudes 519xxxxxxxx 20\n` +
+            `${prefix}economiaadmin quitarsolicitudes 519xxxxxxxx 5\n` +
             `${prefix}economiaadmin setreq 519xxxxxxxx 40`,
           ...global.channelInfo,
         },

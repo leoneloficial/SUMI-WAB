@@ -1,4 +1,5 @@
 import { searchPinterestImages } from "./_searchFallbacks.js";
+import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const COOLDOWN_TIME = 8 * 1000;
 const cooldowns = new Map();
@@ -22,7 +23,8 @@ export default {
   category: "busqueda",
   description: "Busca imagenes estilo Pinterest",
 
-  run: async ({ sock, from, args, msg }) => {
+  run: async (ctx) => {
+    const { sock, from, args, msg } = ctx;
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = from;
     const now = Date.now();
@@ -62,6 +64,8 @@ export default {
       quoted
     );
 
+    let downloadCharge = null;
+
     try {
       const results = await searchPinterestImages(query, 8);
 
@@ -81,6 +85,16 @@ export default {
       const imageUrl =
         item.image_large_url || item.image_medium_url || item.image_small_url;
 
+      downloadCharge = await chargeDownloadRequest(ctx, {
+        commandName: "pinterest",
+        query,
+        totalResults: results.length,
+      });
+
+      if (!downloadCharge.ok) {
+        return null;
+      }
+
       await sock.sendMessage(
         from,
         {
@@ -97,6 +111,10 @@ export default {
     } catch (error) {
       console.error("ERROR PIN:", error?.message || error);
       cooldowns.delete(userId);
+      refundDownloadCharge(ctx, downloadCharge, {
+        commandName: "pinterest",
+        reason: error?.message || "pinterest_error",
+      });
 
       await sock.sendMessage(
         from,
