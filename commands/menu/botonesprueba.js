@@ -33,7 +33,6 @@ export default {
             },
           ],
           headerType: 1,
-          ...global.channelInfo,
         },
         { quoted: msg }
       );
@@ -45,7 +44,6 @@ export default {
         from,
         {
           text: `No pude enviar la prueba de botones.\n\n${error?.message || error}`,
-          ...global.channelInfo,
         },
         { quoted: msg }
       );
