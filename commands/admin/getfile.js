@@ -5,10 +5,20 @@ function resolveSafePath(input = "") {
   const requested = String(input || "").trim();
   if (!requested) return "";
 
-  const cwd = process.cwd();
-  const resolved = path.resolve(cwd, requested);
-  if (!resolved.startsWith(cwd)) return "";
-  return resolved;
+  try {
+    const cwd = fs.realpathSync(process.cwd());
+    const resolved = path.resolve(cwd, requested);
+    const normalized = fs.realpathSync.native
+      ? fs.realpathSync.native(path.dirname(resolved))
+      : fs.realpathSync(path.dirname(resolved));
+    const candidate = path.join(normalized, path.basename(resolved));
+    const relative = path.relative(cwd, candidate);
+
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return "";
+    return candidate;
+  } catch {
+    return "";
+  }
 }
 
 export default {

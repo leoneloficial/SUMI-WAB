@@ -1,5 +1,9 @@
 import { exec } from "child_process";
 
+function isExecEnabled() {
+  return String(process.env.ALLOW_OWNER_EXEC || "").trim().toLowerCase() === "true";
+}
+
 export default {
   name: "exec",
   command: ["exec"],
@@ -8,6 +12,17 @@ export default {
   ownerOnly: true,
 
   run: async ({ sock, msg, from, args = [] }) => {
+    if (!isExecEnabled()) {
+      return sock.sendMessage(
+        from,
+        {
+          text: "El comando .exec esta deshabilitado en produccion. Activa ALLOW_OWNER_EXEC=true para usarlo.",
+          ...global.channelInfo,
+        },
+        { quoted: msg }
+      );
+    }
+
     const command = String(args.join(" ") || "").trim();
 
     if (!command) {

@@ -1,3 +1,7 @@
+function isEvalEnabled() {
+  return String(process.env.ALLOW_OWNER_EVAL || "").trim().toLowerCase() === "true";
+}
+
 export default {
   name: "eval",
   command: ["eval"],
@@ -6,6 +10,17 @@ export default {
   ownerOnly: true,
 
   run: async ({ sock, msg, from, args = [] }) => {
+    if (!isEvalEnabled()) {
+      return sock.sendMessage(
+        from,
+        {
+          text: "El comando .eval esta deshabilitado en produccion. Activa ALLOW_OWNER_EVAL=true para usarlo.",
+          ...global.channelInfo,
+        },
+        { quoted: msg }
+      );
+    }
+
     const code = String(args.join(" ") || "").trim();
 
     if (!code) {
