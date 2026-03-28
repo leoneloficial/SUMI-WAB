@@ -3,7 +3,7 @@ import yts from 'yt-search'
 export default {
   name: 'play',
   command: ['play'],
-  category: 'descargas',
+  category: 'descarga',
 
   async run(ctx) {
     const { sock: conn, m, from, args } = ctx
