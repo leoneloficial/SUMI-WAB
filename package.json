@@ -12,6 +12,7 @@
     "start": "node index.js",
     "check": "node --check index.js",
     "smoke": "node scripts/smoke-check.mjs",
+    "postinstall": "node scripts/patch-punycode.mjs",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:restart": "pm2 restart ecosystem.config.cjs"
   },
@@ -24,6 +25,7 @@
     "fluent-ffmpeg": "^2.1.2",
     "pino": "^9.13.1",
     "play-dl": "^1.9.7",
+    "punycode": "^2.3.1",
     "yt-search": "^2.10.4"
   },
   "overrides": {
