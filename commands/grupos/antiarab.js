@@ -1,5 +1,9 @@
 import path from "path";
 import { createScheduledJsonStore } from "../../lib/json-store.js";
+import {
+  findGroupParticipant,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
 
 const FILE = path.join(process.cwd(), "database", "antiarab.json");
 const DEFAULT_PREFIXES = ["212", "213", "216", "218", "20", "964", "966", "971", "973", "974", "968", "967", "962", "963", "965", "961", "970"];
@@ -57,13 +61,25 @@ export default {
     if (!update?.id || update.action !== "add") return;
     const config = ensureGroup(update.id);
     if (!config.enabled) return;
+    let metadata = null;
+
+    try {
+      metadata = await sock.groupMetadata(update.id);
+    } catch {}
 
     for (const participant of update.participants || []) {
       const number = normalizeParticipantNumber(participant);
       if (!config.prefixes.some((prefix) => number.startsWith(prefix))) continue;
 
       try {
-        await sock.groupParticipantsUpdate(update.id, [participant], "remove");
+        await runGroupParticipantAction(
+          sock,
+          update.id,
+          metadata || {},
+          findGroupParticipant(metadata || {}, [participant]),
+          [participant],
+          "remove"
+        );
       } catch {}
     }
   },

@@ -1,3 +1,8 @@
+import {
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+} from "../../lib/group-compat.js";
+
 export default {
   command: ["tagall"],
   category: "grupo",
@@ -7,14 +12,17 @@ export default {
 
   run: async ({ sock, msg, from, args }) => {
     const meta = await sock.groupMetadata(from);
-    const members = meta.participants.map((p) => p.id);
+    const participants = Array.isArray(meta?.participants) ? meta.participants : [];
+    const members = participants
+      .map((participant) => getParticipantMentionJid(meta, participant, participant?.id))
+      .filter(Boolean);
 
     const texto = args.length
       ? args.join(" ")
       : "📣 *Tagall*";
 
-    const lines = meta.participants
-      .map((p) => `• @${p.id.split("@")[0]}`)
+    const lines = participants
+      .map((participant) => `• ${getParticipantDisplayTag(participant, participant?.id)}`)
       .join("\n");
 
     return sock.sendMessage(

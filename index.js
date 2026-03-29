@@ -3,7 +3,7 @@
 //OWNDER DVYER 
 // =========================
 
-import * as baileys from "@whiskeysockets/baileys";
+import * as baileys from "@dvyer/baileys";
 import pino from "pino";
 import chalk from "chalk";
 import dotenv from "dotenv";
@@ -31,6 +31,11 @@ import {
   getAutoCleanState,
   setAutoCleanConfig,
 } from "./lib/autoclean.js";
+import {
+  findGroupParticipant as findCompatGroupParticipant,
+  isGroupMetadataOwner as isCompatGroupMetadataOwner,
+  normalizeJidUser as normalizeCompatJidUser,
+} from "./lib/group-compat.js";
 import { applyStoredRuntimeVars } from "./lib/runtime-vars.js";
 import { writeJsonAtomic as writeAtomicJsonFile } from "./lib/json-store.js";
 import { touchEconomyProfile } from "./commands/economia/_shared.js";
@@ -781,10 +786,7 @@ function runPm2Command(args = [], extraEnv = {}) {
 }
 
 function normalizeJidUser(value = "") {
-  const jid = String(value || "").trim();
-  if (!jid) return "";
-  const [user] = jid.split("@");
-  return user.split(":")[0];
+  return normalizeCompatJidUser(value);
 }
 
 function tipoChat(jid = "") {
@@ -936,26 +938,59 @@ function serializeMessage(raw) {
   const text = String(obtenerTexto(message) || "").trim();
   const contextInfo = getContextInfo(raw?.message || {});
   const from = raw?.key?.remoteJid || "";
+  const keyParticipant = String(raw?.key?.participant || "").trim();
+  const keyParticipantAlt = String(
+    raw?.key?.participantAlt || raw?.key?.remoteJidAlt || ""
+  ).trim();
+  const contextParticipant = String(contextInfo?.participant || "").trim();
+  const contextParticipantAlt = String(
+    contextInfo?.participantAlt || contextInfo?.participantPn || ""
+  ).trim();
   const sender =
-    raw?.key?.participant ||
-    contextInfo?.participant ||
+    keyParticipant ||
+    contextParticipant ||
     raw?.key?.remoteJid ||
     "";
+  const senderPhone =
+    String(raw?.key?.participantPn || raw?.key?.senderPn || "").trim() ||
+    keyParticipantAlt ||
+    contextParticipantAlt ||
+    (String(sender).endsWith("@s.whatsapp.net") ? String(sender) : "");
+  const senderLid =
+    String(raw?.key?.participantLid || raw?.key?.senderLid || "").trim() ||
+    (String(sender).endsWith("@lid") ? String(sender) : "") ||
+    (keyParticipantAlt.endsWith("@lid") ? keyParticipantAlt : "") ||
+    (contextParticipant.endsWith("@lid") ? contextParticipant : "");
 
   let quoted = null;
 
   if (contextInfo?.quotedMessage) {
     const quotedText = obtenerTexto(contextInfo.quotedMessage);
+    const quotedParticipant = contextParticipant || sender;
+    const quotedParticipantAlt = contextParticipantAlt || senderPhone;
+    const quotedParticipantLid =
+      String(contextInfo?.participantLid || "").trim() ||
+      (quotedParticipant.endsWith("@lid") ? quotedParticipant : "") ||
+      (quotedParticipantAlt.endsWith("@lid") ? quotedParticipantAlt : "");
     quoted = {
       key: {
         remoteJid: from,
         fromMe: false,
         id: contextInfo?.stanzaId || "",
-        participant: contextInfo?.participant || sender,
+        participant: quotedParticipant,
+        participantAlt: quotedParticipantAlt,
+        participantPn: quotedParticipantAlt,
+        participantLid: quotedParticipantLid,
       },
       message: contextInfo.quotedMessage,
       text: quotedText,
       body: quotedText,
+      sender: quotedParticipant,
+      senderPhone:
+        quotedParticipantAlt && quotedParticipantAlt.endsWith("@s.whatsapp.net")
+          ? quotedParticipantAlt
+          : senderPhone,
+      senderLid: quotedParticipantLid,
     };
   }
 
@@ -969,8 +1004,8 @@ function serializeMessage(raw) {
     chat: from,
     isGroup: from.endsWith("@g.us"),
     pushName: String(raw?.pushName || raw?.notifyName || raw?.verifiedBizName || "").trim(),
-    senderPhone: String(raw?.key?.participantPn || raw?.key?.senderPn || "").trim(),
-    senderLid: String(raw?.key?.participantLid || raw?.key?.senderLid || "").trim(),
+    senderPhone,
+    senderLid,
     quoted,
   };
 }
@@ -2522,6 +2557,7 @@ async function getMessageExecutionInfo(botState, sock, message) {
   }
 
   let metadata = cachedGroupMetadata(botState, message.from);
+  let usedCachedMetadata = Boolean(metadata);
 
   if (!metadata) {
     try {
@@ -2534,31 +2570,63 @@ async function getMessageExecutionInfo(botState, sock, message) {
     return info;
   }
 
-  const participants = Array.isArray(metadata.participants)
-    ? metadata.participants
-    : [];
-  const normalizedBotUserId = normalizeJidUser(sock?.user?.id);
-  let participant = null;
-  let botParticipant = null;
+  const participant =
+    findCompatGroupParticipant(metadata, [
+      message.sender,
+      message.senderLid,
+      message.senderPhone,
+    ]) ||
+    null;
+  const botParticipant =
+    findCompatGroupParticipant(metadata, [
+      sock?.user?.id,
+      normalizeJidUser(sock?.user?.id),
+    ]) ||
+    null;
+  const needsFreshMetadata =
+    usedCachedMetadata &&
+    (!participant ||
+      !botParticipant ||
+      (!Boolean(participant?.admin) &&
+        !isCompatGroupMetadataOwner(metadata, [
+          message.sender,
+          message.senderLid,
+          message.senderPhone,
+        ])));
 
-  for (const value of participants) {
-    const normalizedParticipantId = normalizeJidUser(value?.id);
-
-    if (!participant && normalizedParticipantId === senderId) {
-      participant = value;
-    }
-
-    if (!botParticipant && normalizedParticipantId === normalizedBotUserId) {
-      botParticipant = value;
-    }
-
-    if (participant && botParticipant) {
-      break;
-    }
+  if (needsFreshMetadata) {
+    try {
+      const freshMetadata = await sock.groupMetadata(message.from);
+      cacheGroupMetadata(botState, message.from, freshMetadata);
+      metadata = freshMetadata;
+    } catch {}
   }
 
-  const esAdmin = Boolean(participant?.admin);
-  const esBotAdmin = Boolean(botParticipant?.admin);
+  const resolvedParticipant =
+    findCompatGroupParticipant(metadata, [
+      message.sender,
+      message.senderLid,
+      message.senderPhone,
+    ]) ||
+    participant ||
+    null;
+  const resolvedBotParticipant =
+    findCompatGroupParticipant(metadata, [
+      sock?.user?.id,
+      normalizeJidUser(sock?.user?.id),
+    ]) ||
+    botParticipant ||
+    null;
+  const esAdmin =
+    Boolean(resolvedParticipant?.admin) ||
+    isCompatGroupMetadataOwner(metadata, [
+      message.sender,
+      message.senderLid,
+      message.senderPhone,
+    ]);
+  const esBotAdmin =
+    Boolean(resolvedBotParticipant?.admin) ||
+    isCompatGroupMetadataOwner(metadata, [sock?.user?.id]);
 
   return {
     ...info,

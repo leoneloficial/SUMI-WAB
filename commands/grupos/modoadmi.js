@@ -1,5 +1,8 @@
 import fs from "fs";
 import path from "path";
+import {
+  getParticipantMentionJid,
+} from "../../lib/group-compat.js";
 
 // ================== DB ==================
 const DB_DIR = path.join(process.cwd(), "database");
@@ -126,12 +129,14 @@ export default {
       const posible = txt.split(/\s+/)[0]?.toLowerCase();
       if (posible && comandos?.has(posible)) {
         // aviso con cooldown
-        const sender = msg.key.participant || msg.key.remoteJid;
+        const sender = msg.sender || msg.key?.participant || msg.key?.remoteJid || from;
         const now = Date.now();
         if (!warnCooldown.has(sender) || now > warnCooldown.get(sender)) {
           warnCooldown.set(sender, now + WARN_MS);
+          const mentionJid = getParticipantMentionJid({}, null, sender);
           await sock.sendMessage(from, {
             text: "🛡️ *Modo admin activo:* solo admins/owner pueden usar comandos.",
+            mentions: mentionJid ? [mentionJid] : [],
             ...global.channelInfo
           });
         }
@@ -153,12 +158,14 @@ export default {
 
     // ✅ SOLO bloquear si el comando existe
     if (posibleCmd && comandos?.has(posibleCmd)) {
-      const sender = msg.key.participant || msg.key.remoteJid;
+      const sender = msg.sender || msg.key?.participant || msg.key?.remoteJid || from;
       const now = Date.now();
       if (!warnCooldown.has(sender) || now > warnCooldown.get(sender)) {
         warnCooldown.set(sender, now + WARN_MS);
+        const mentionJid = getParticipantMentionJid({}, null, sender);
         await sock.sendMessage(from, {
           text: "🛡️ *Modo admin activo:* solo admins/owner pueden usar comandos.",
+          mentions: mentionJid ? [mentionJid] : [],
           ...global.channelInfo
         });
       }

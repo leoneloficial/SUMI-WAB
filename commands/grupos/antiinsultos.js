@@ -1,5 +1,10 @@
 import fs from "fs";
 import path from "path";
+import {
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 
@@ -162,7 +167,7 @@ export default {
     return sock.sendMessage(from, { text: "❌ Usa: .antiinsultos on / .antiinsultos off", ...global.channelInfo }, { quoted: msg });
   },
 
-  onMessage: async ({ sock, msg, from, esGrupo, esAdmin, esOwner }) => {
+  onMessage: async ({ sock, msg, from, esGrupo, esAdmin, esOwner, groupMetadata }) => {
     if (!esGrupo) return;
     if (!gruposActivos.has(from)) return;
 
@@ -173,8 +178,9 @@ export default {
     const msgId = msg.key?.id;
     if (alreadyProcessed(from, msgId)) return;
 
-    const sender = msg.key?.participant || from;
+    const sender = msg.sender || msg.key?.participant || from;
     if (!sender) return;
+    const mentionJid = getParticipantMentionJid(groupMetadata || {}, null, sender);
 
     const textRaw = extractText(msg.message);
     if (!textRaw) return;
@@ -205,7 +211,17 @@ export default {
     if (current >= MAX_WARNS) {
       let kicked = false;
       try {
-        await sock.groupParticipantsUpdate(from, [sender], "remove");
+        const removeResult = await runGroupParticipantAction(
+          sock,
+          from,
+          groupMetadata || {},
+          null,
+          [sender],
+          "remove"
+        );
+        if (!removeResult.ok) {
+          throw removeResult.error || new Error("No pude expulsar.");
+        }
         kicked = true;
       } catch {
         kicked = false;
@@ -222,9 +238,9 @@ export default {
         return sock.sendMessage(from, {
           text:
             `🚫 *ANTI-INSULTOS*\n` +
-            `@${sender.split("@")[0]} llegó a *${MAX_WARNS}/${MAX_WARNS}* advertencias.\n` +
+            `${getParticipantDisplayTag(null, sender)} llegó a *${MAX_WARNS}/${MAX_WARNS}* advertencias.\n` +
             `✅ Fue expulsado del grupo.`,
-          mentions: [sender],
+          mentions: mentionJid ? [mentionJid] : [],
           ...global.channelInfo
         });
       }
@@ -233,9 +249,9 @@ export default {
       return sock.sendMessage(from, {
         text:
           `🚫 *ANTI-INSULTOS*\n` +
-          `@${sender.split("@")[0]} llegó a *${MAX_WARNS}/${MAX_WARNS}* advertencias.\n` +
+          `${getParticipantDisplayTag(null, sender)} llegó a *${MAX_WARNS}/${MAX_WARNS}* advertencias.\n` +
           `⚠️ No pude expulsar (¿bot sin admin?).`,
-        mentions: [sender],
+        mentions: mentionJid ? [mentionJid] : [],
         ...global.channelInfo
       });
     }
@@ -244,9 +260,9 @@ export default {
     return sock.sendMessage(from, {
       text:
         `⚠️ *ANTI-INSULTOS*\n` +
-        `@${sender.split("@")[0]} cuidado con el lenguaje.\n` +
+        `${getParticipantDisplayTag(null, sender)} cuidado con el lenguaje.\n` +
         `📌 Advertencia: *${current}/${MAX_WARNS}*`,
-      mentions: [sender],
+      mentions: mentionJid ? [mentionJid] : [],
       ...global.channelInfo
     });
   }

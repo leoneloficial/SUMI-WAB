@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import * as baileys from "@whiskeysockets/baileys";
+import * as baileys from "@dvyer/baileys";
 
 const { downloadContentFromMessage } = baileys;
 const TMP_DIR = path.join(process.cwd(), "tmp");

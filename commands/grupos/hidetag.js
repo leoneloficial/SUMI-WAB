@@ -1,3 +1,5 @@
+import { getParticipantMentionJid } from "../../lib/group-compat.js";
+
 export default {
   command: ["hidetag"],
   category: "grupo",
@@ -7,7 +9,9 @@ export default {
 
   run: async ({ sock, msg, from, args }) => {
     const meta = await sock.groupMetadata(from);
-    const members = meta.participants.map((p) => p.id);
+    const members = (Array.isArray(meta?.participants) ? meta.participants : [])
+      .map((participant) => getParticipantMentionJid(meta, participant, participant?.id))
+      .filter(Boolean);
 
     const texto = args.length
       ? args.join(" ")

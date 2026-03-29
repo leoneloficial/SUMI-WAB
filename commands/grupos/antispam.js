@@ -1,5 +1,10 @@
 import fs from "fs";
 import path from "path";
+import {
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const FILE = path.join(DB_DIR, "antispam.json");
@@ -96,12 +101,13 @@ export default {
   },
 
   // Esto lo llamará tu index.js cuando recibe mensajes (si tu loader soporta onMessage)
-  onMessage: async ({ sock, msg, from, esGrupo, esAdmin, esOwner }) => {
+  onMessage: async ({ sock, msg, from, esGrupo, esAdmin, esOwner, groupMetadata }) => {
     if (!esGrupo) return;
     if (!gruposAntispam.has(from)) return;
 
-    const sender = msg.key.participant;
+    const sender = msg.sender || msg.key?.participant;
     if (!sender) return;
+    const mentionJid = getParticipantMentionJid(groupMetadata || {}, null, sender);
 
     // No castigar admins/owner
     if (esAdmin || esOwner) return;
@@ -125,23 +131,36 @@ export default {
       if (data.strikes > MAX_STRIKES) {
         // intenta expulsar
         try {
-          await sock.groupParticipantsUpdate(from, [sender], "remove");
+          const removeResult = await runGroupParticipantAction(
+            sock,
+            from,
+            groupMetadata || {},
+            null,
+            [sender],
+            "remove"
+          );
+          if (!removeResult.ok) {
+            throw removeResult.error || new Error("No pude expulsar.");
+          }
+
           await sock.sendMessage(from, {
-            text: `🚫 Antispam: @${sender.split("@")[0]} expulsado por spam.`,
-            mentions: [sender],
+            text: `🚫 Antispam: ${getParticipantDisplayTag(null, sender)} expulsado por spam.`,
+            mentions: mentionJid ? [mentionJid] : [],
             ...global.channelInfo
           });
         } catch {
           await sock.sendMessage(from, {
-            text: `⚠️ Antispam: @${sender.split("@")[0]} spameando (no pude expulsar).`,
-            mentions: [sender],
+            text: `⚠️ Antispam: ${getParticipantDisplayTag(null, sender)} spameando (no pude expulsar).`,
+            mentions: mentionJid ? [mentionJid] : [],
             ...global.channelInfo
           });
         }
       } else {
         await sock.sendMessage(from, {
-          text: `⚠️ Antispam: @${sender.split("@")[0]} baja el spam. (strike ${data.strikes}/${MAX_STRIKES + 1})`,
-          mentions: [sender],
+          text:
+            `⚠️ Antispam: ${getParticipantDisplayTag(null, sender)} baja el spam. ` +
+            `(strike ${data.strikes}/${MAX_STRIKES + 1})`,
+          mentions: mentionJid ? [mentionJid] : [],
           ...global.channelInfo
         });
       }

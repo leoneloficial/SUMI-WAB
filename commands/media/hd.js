@@ -1,4 +1,4 @@
-import * as baileys from "@whiskeysockets/baileys";
+import * as baileys from "@dvyer/baileys";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
 
 const { downloadContentFromMessage } = baileys;

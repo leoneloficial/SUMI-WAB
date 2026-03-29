@@ -1,5 +1,10 @@
 import fs from "fs";
 import path from "path";
+import {
+  findGroupParticipant,
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const FILE = path.join(DB_DIR, "welcome.json");
@@ -211,7 +216,9 @@ export default {
     const botName = String(settings?.botName || "Bot").trim() || "Bot";
 
     for (const participant of update.participants || []) {
-      const userTag = `@${String(participant).split("@")[0].split(":")[0]}`;
+      const metadataParticipant = findGroupParticipant(metadata || {}, [participant]);
+      const mentionJid = getParticipantMentionJid(metadata || {}, metadataParticipant, participant);
+      const userTag = getParticipantDisplayTag(metadataParticipant, participant);
       const customText = config.text
         ? `\n\n${config.text}`
         : `\n\nBienvenido a *${groupName}*.`;
@@ -236,7 +243,7 @@ export default {
           await sock.sendMessage(update.id, {
             image: imageBuffer,
             caption,
-            mentions: [participant],
+            mentions: mentionJid ? [mentionJid] : [],
             ...global.channelInfo,
           });
           continue;
@@ -245,7 +252,7 @@ export default {
 
       await sock.sendMessage(update.id, {
         text: caption,
-        mentions: [participant],
+        mentions: mentionJid ? [mentionJid] : [],
         ...global.channelInfo,
       });
     }

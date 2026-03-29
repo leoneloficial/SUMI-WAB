@@ -1,3 +1,9 @@
+import {
+  getParticipantDisplayTag,
+  resolveGroupTarget,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
+
 export default {
   command: ["promote", "ascender"],
   category: "grupo",
@@ -5,27 +11,42 @@ export default {
   groupOnly: true,
   adminOnly: true,
 
-  run: async ({ sock, msg, from }) => {
-    const mentioned =
-      msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-
-    const quotedParticipant =
-      msg.message?.extendedTextMessage?.contextInfo?.participant || null;
-
-    const target = mentioned[0] || quotedParticipant;
-    if (!target) {
-      return sock.sendMessage(
-        from,
-        { text: "⚙️ Usa: responde a alguien o menciónalo.\nEj: .promote @usuario", ...global.channelInfo },
-        { quoted: msg }
-      );
-    }
-
+  run: async ({ sock, msg, from, args = [] }) => {
     try {
-      await sock.groupParticipantsUpdate(from, [target], "promote");
+      const metadata = await sock.groupMetadata(from);
+      const { participant, jid: targetJid, candidates } = resolveGroupTarget(
+        metadata,
+        msg || {},
+        args
+      );
+
+      if (!targetJid) {
+        return sock.sendMessage(
+          from,
+          { text: "⚙️ Usa: responde a alguien o menciónalo.\nEj: .promote @usuario", ...global.channelInfo },
+          { quoted: msg }
+        );
+      }
+
+      const promoteResult = await runGroupParticipantAction(
+        sock,
+        from,
+        metadata,
+        participant,
+        candidates,
+        "promote"
+      );
+      if (!promoteResult.ok) {
+        throw promoteResult.error || new Error("No pude promover al usuario.");
+      }
+
       return sock.sendMessage(
         from,
-        { text: "✅ Usuario promovido a admin.", mentions: [target], ...global.channelInfo },
+        {
+          text: `✅ ${getParticipantDisplayTag(participant, targetJid)} promovido a admin.`,
+          mentions: [promoteResult.jid],
+          ...global.channelInfo,
+        },
         { quoted: msg }
       );
     } catch (e) {

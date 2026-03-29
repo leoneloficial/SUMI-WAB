@@ -1,5 +1,9 @@
 import path from "path";
 import { createScheduledJsonStore, normalizeJidUser } from "../../lib/json-store.js";
+import {
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+} from "../../lib/group-compat.js";
 
 const FILE = path.join(process.cwd(), "database", "antiflood.json");
 const store = createScheduledJsonStore(FILE, () => ({
@@ -58,7 +62,7 @@ export default {
     );
   },
 
-  onMessage: async ({ sock, msg, from, sender, esGrupo, esAdmin, esOwner }) => {
+  onMessage: async ({ sock, msg, from, sender, esGrupo, esAdmin, esOwner, groupMetadata }) => {
     if (!esGrupo || esAdmin || esOwner) return false;
     const config = ensureGroup(from);
     if (!config.enabled) return false;
@@ -77,11 +81,13 @@ export default {
       await sock.sendMessage(from, { delete: msg.key, ...global.channelInfo });
     } catch {}
 
+    const mentionJid = getParticipantMentionJid(groupMetadata || {}, null, sender);
+
     await sock.sendMessage(
       from,
       {
-        text: `Antiflood: @${normalizeJidUser(sender)} baja la velocidad de mensajes.`,
-        mentions: [sender],
+        text: `Antiflood: ${getParticipantDisplayTag(null, sender)} baja la velocidad de mensajes.`,
+        mentions: mentionJid ? [mentionJid] : [],
         ...global.channelInfo,
       },
       {}

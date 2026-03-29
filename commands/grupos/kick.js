@@ -1,3 +1,13 @@
+import {
+  findGroupParticipant,
+  getParticipantActionCandidates,
+  getParticipantDisplayTag,
+  resolveGroupTarget,
+  runGroupParticipantAction,
+  isParticipantAdmin,
+  isParticipantSuperAdmin,
+} from "../../lib/group-compat.js";
+
 export default {
   command: ["kick"],
   groupOnly: true,
@@ -5,47 +15,45 @@ export default {
   category: "grupo",
 
   async run({ sock, from, msg, args, m }) {
-    const quotedMsg = msg?.message?.extendedTextMessage?.contextInfo;
-    const quotedParticipant = quotedMsg?.participant;
+    try {
+      const metadata = await sock.groupMetadata(from);
+      const { participant, jid: targetJid, candidates } = resolveGroupTarget(
+        metadata,
+        msg || m || {},
+        args
+      );
 
-    // También permite mención: .kick @usuario
-    const mentioned =
-      quotedMsg?.mentionedJid?.[0] ||
-      msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] ||
-      null;
-
-    const target = quotedParticipant || mentioned;
-
-    if (!target) {
-      return await sock.sendMessage(
-        from,
-        {
-          text:
+      if (!targetJid) {
+        return await sock.sendMessage(
+          from,
+          {
+            text:
 `⚠️ *¿A quién expulso?*
 
 ✅ *Formas de usarlo:*
 • Responde al mensaje del usuario y escribe: *.kick*
 • Menciona al usuario: *.kick @usuario*`,
-          ...global.channelInfo
-        }
-      );
-    }
+            ...global.channelInfo
+          }
+        );
+      }
 
-    try {
-      const metadata = await sock.groupMetadata(from);
-      const botId = sock?.user?.id?.split(":")[0] + "@s.whatsapp.net";
+      const botParticipant = findGroupParticipant(metadata, [sock?.user?.id]);
+      const botCandidates = getParticipantActionCandidates(
+        metadata,
+        botParticipant,
+        [sock?.user?.id]
+      );
 
       // Evitar expulsar al bot
-      if (target === botId) {
+      if (botCandidates.includes(targetJid)) {
         return await sock.sendMessage(from, {
           text: "🤖 *No puedo expulsarme a mí mismo.*",
           ...global.channelInfo
         });
       }
 
-      const participante = metadata.participants.find((p) => p.id === target);
-
-      if (!participante) {
+      if (!participant) {
         return await sock.sendMessage(from, {
           text: "❌ *Usuario no encontrado en este grupo.*",
           ...global.channelInfo
@@ -53,7 +61,7 @@ export default {
       }
 
       // 🚫 No expulsar al creador (superadmin)
-      if (participante.admin === "superadmin") {
+      if (isParticipantSuperAdmin(participant)) {
         return await sock.sendMessage(from, {
           text: "👑 *No puedes expulsar al creador del grupo.*",
           ...global.channelInfo
@@ -61,21 +69,32 @@ export default {
       }
 
       // 🚫 No expulsar a otro admin
-      if (participante.admin === "admin") {
+      if (isParticipantAdmin(participant)) {
         return await sock.sendMessage(from, {
           text: "🛡️ *No puedes expulsar a otro administrador.*",
           ...global.channelInfo
         });
       }
 
-      await sock.groupParticipantsUpdate(from, [target], "remove");
+      const removeResult = await runGroupParticipantAction(
+        sock,
+        from,
+        metadata,
+        participant,
+        candidates,
+        "remove"
+      );
+
+      if (!removeResult.ok) {
+        throw removeResult.error || new Error("No pude expulsar al usuario.");
+      }
 
       await sock.sendMessage(from, {
         text:
 `✅ *Expulsado correctamente.*
 
-👤 Usuario: @${target.split("@")[0]}`,
-        mentions: [target],
+👤 Usuario: ${getParticipantDisplayTag(participant, targetJid)}`,
+        mentions: [removeResult.jid],
         ...global.channelInfo
       });
 

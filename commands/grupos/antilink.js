@@ -1,5 +1,10 @@
 import fs from "fs";
 import path from "path";
+import {
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const FILE = path.join(DB_DIR, "antilink.json");
@@ -301,7 +306,7 @@ export default {
     );
   },
 
-  async onMessage({ sock, msg, from, esGrupo, esAdmin, esOwner, esBotAdmin }) {
+  async onMessage({ sock, msg, from, esGrupo, esAdmin, esOwner, esBotAdmin, groupMetadata }) {
     if (!esGrupo) return;
 
     const config = getGroupConfig(from);
@@ -321,8 +326,9 @@ export default {
 
     if (!blockedLink) return;
 
-    const sender = msg.key?.participant;
+    const sender = msg.sender || msg.key?.participant;
     if (!sender) return;
+    const mentionJid = getParticipantMentionJid(groupMetadata || {}, null, sender);
 
     try {
       await sock.sendMessage(from, { delete: msg.key, ...global.channelInfo });
@@ -330,9 +336,23 @@ export default {
 
     if (config.mode === "kick" && esBotAdmin) {
       try {
-        await sock.groupParticipantsUpdate(from, [sender], "remove");
+        const removeResult = await runGroupParticipantAction(
+          sock,
+          from,
+          groupMetadata || {},
+          null,
+          [sender],
+          "remove"
+        );
+        if (!removeResult.ok) {
+          throw removeResult.error || new Error("No pude expulsar al usuario.");
+        }
+
         await sock.sendMessage(from, {
-          text: `Enlace bloqueado: *${blockedLink.domain || blockedLink.raw}*\nUsuario expulsado automaticamente.`,
+          text:
+            `Enlace bloqueado: *${blockedLink.domain || blockedLink.raw}*\n` +
+            `${getParticipantDisplayTag(null, sender)} expulsado automaticamente.`,
+          mentions: mentionJid ? [mentionJid] : [],
           ...global.channelInfo,
         });
         return;

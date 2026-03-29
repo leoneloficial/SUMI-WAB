@@ -1,3 +1,9 @@
+import {
+  getParticipantDisplayTag,
+  resolveGroupTarget,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
+
 export default {
   command: ["demote", "degradar"],
   category: "grupo",
@@ -5,27 +11,42 @@ export default {
   groupOnly: true,
   adminOnly: true,
 
-  run: async ({ sock, msg, from }) => {
-    const mentioned =
-      msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-
-    const quotedParticipant =
-      msg.message?.extendedTextMessage?.contextInfo?.participant || null;
-
-    const target = mentioned[0] || quotedParticipant;
-    if (!target) {
-      return sock.sendMessage(
-        from,
-        { text: "⚙️ Usa: responde a alguien o menciónalo.\nEj: .demote @usuario", ...global.channelInfo },
-        { quoted: msg }
-      );
-    }
-
+  run: async ({ sock, msg, from, args = [] }) => {
     try {
-      await sock.groupParticipantsUpdate(from, [target], "demote");
+      const metadata = await sock.groupMetadata(from);
+      const { participant, jid: targetJid, candidates } = resolveGroupTarget(
+        metadata,
+        msg || {},
+        args
+      );
+
+      if (!targetJid) {
+        return sock.sendMessage(
+          from,
+          { text: "⚙️ Usa: responde a alguien o menciónalo.\nEj: .demote @usuario", ...global.channelInfo },
+          { quoted: msg }
+        );
+      }
+
+      const demoteResult = await runGroupParticipantAction(
+        sock,
+        from,
+        metadata,
+        participant,
+        candidates,
+        "demote"
+      );
+      if (!demoteResult.ok) {
+        throw demoteResult.error || new Error("No pude degradar al usuario.");
+      }
+
       return sock.sendMessage(
         from,
-        { text: "✅ Admin removido.", mentions: [target], ...global.channelInfo },
+        {
+          text: `✅ Admin removido a ${getParticipantDisplayTag(participant, targetJid)}.`,
+          mentions: [demoteResult.jid],
+          ...global.channelInfo,
+        },
         { quoted: msg }
       );
     } catch (e) {

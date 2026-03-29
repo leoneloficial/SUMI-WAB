@@ -1,5 +1,10 @@
 import fs from "fs";
 import path from "path";
+import {
+  findGroupParticipant,
+  getParticipantDisplayTag,
+  getParticipantMentionJid,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const FILE = path.join(DB_DIR, "antidelete.json");
@@ -112,9 +117,17 @@ export default {
     const sender =
       deleteKey.participant ||
       deletedMessage?.sender ||
+      deletedMessage?.senderLid ||
+      deletedMessage?.senderPhone ||
       deleteKey.remoteJid ||
       "";
-    const userTag = `@${String(sender).split("@")[0].split(":")[0]}`;
+    let metadata = null;
+    try {
+      metadata = await sock.groupMetadata(from);
+    } catch {}
+    const participant = findGroupParticipant(metadata || {}, [sender]);
+    const mentionJid = getParticipantMentionJid(metadata || {}, participant, sender);
+    const userTag = getParticipantDisplayTag(participant, sender);
     const recoveredText = getTextFromDeletedMessage(deletedMessage);
 
     let body =
@@ -138,7 +151,7 @@ export default {
 
     await sock.sendMessage(from, {
       text: body,
-      mentions: sender ? [sender] : [],
+      mentions: mentionJid ? [mentionJid] : [],
       ...global.channelInfo,
     });
   },

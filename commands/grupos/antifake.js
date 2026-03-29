@@ -1,5 +1,11 @@
 import fs from "fs";
 import path from "path";
+import {
+  findGroupParticipant,
+  getParticipantMentionJid,
+  normalizeJidDigits,
+  runGroupParticipantAction,
+} from "../../lib/group-compat.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 const FILE = path.join(DB_DIR, "antifake.json");
@@ -175,26 +181,35 @@ export default {
     const botNumber = normalizePrefix(sock?.user?.id || "");
 
     let botIsAdmin = false;
+    let metadata = null;
     try {
-      const metadata = await sock.groupMetadata(update.id);
-      const botId = String(sock?.user?.id || "").split(":")[0].split("@")[0];
-      botIsAdmin = Array.isArray(metadata?.participants)
-        ? metadata.participants.some(
-            (participant) =>
-              String(participant?.id || "").includes(botId) && Boolean(participant?.admin)
-          )
-        : false;
+      metadata = await sock.groupMetadata(update.id);
+      const botParticipant = findGroupParticipant(metadata, [sock?.user?.id]);
+      botIsAdmin = Boolean(botParticipant?.admin);
     } catch {}
 
     for (const participant of update.participants || []) {
-      const number = String(participant || "").split("@")[0].split(":")[0].replace(/[^\d]/g, "");
+      const metadataParticipant = findGroupParticipant(metadata || {}, [participant]);
+      const mentionJid = getParticipantMentionJid(
+        metadata || {},
+        metadataParticipant,
+        participant
+      );
+      const number = normalizeJidDigits(participant);
       if (!number || isAllowed(number, config) || ownerNumbers.includes(number) || number === botNumber) {
         continue;
       }
 
       if (botIsAdmin) {
         try {
-          await sock.groupParticipantsUpdate(update.id, [participant], "remove");
+          await runGroupParticipantAction(
+            sock,
+            update.id,
+            metadata || {},
+            metadataParticipant,
+            [participant],
+            "remove"
+          );
         } catch {}
       }
 
@@ -203,7 +218,7 @@ export default {
           `*ANTIFAKE*\n\n` +
           `Numero detectado: *+${number}*\n` +
           `No coincide con los prefijos permitidos del grupo.`,
-        mentions: [participant],
+        mentions: mentionJid ? [mentionJid] : [],
         ...global.channelInfo,
       });
     }

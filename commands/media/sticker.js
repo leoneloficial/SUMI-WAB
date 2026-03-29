@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import ffmpeg from "fluent-ffmpeg";
 import pino from "pino";
-import { downloadMediaMessage } from "@whiskeysockets/baileys";
+import { downloadMediaMessage } from "@dvyer/baileys";
 
 const logger = pino({ level: "silent" });
 const TMP_DIR = path.join(process.cwd(), "tmp");
