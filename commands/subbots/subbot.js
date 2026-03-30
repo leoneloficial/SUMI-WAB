@@ -107,6 +107,12 @@ async function sendSubbotRequestMenu({
         },
         {
           header: "OWNER",
+          title: `Reconectar slot ${ownerSlot}`,
+          description: "Reconecta sin borrar la sesion".slice(0, 72),
+          id: `${prefix}subbot reconectar ${ownerSlot}`,
+        },
+        {
+          header: "OWNER",
           title: `Liberar slot ${ownerSlot}`,
           description: "Apaga y libera ese subbot".slice(0, 72),
           id: `${prefix}subbot liberar ${ownerSlot}`,
@@ -322,6 +328,46 @@ export default {
       );
     }
 
+    if (["reconectar", "reconnect", "rc"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          {
+            text: "Solo el owner puede reconectar subbots.",
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const slot = parseSlotToken(args[1], Number(subbotAccess?.maxSlots || 15));
+      if (!slot || !runtime?.reconnectSubbot) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `Usa: *${prefix}subbot reconectar 3*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const result = await runtime.reconnectSubbot(`subbot${slot}`, {
+        reason: "owner_command",
+      });
+
+      return sock.sendMessage(
+        from,
+        {
+          text: result?.ok
+            ? result?.message || `Reconectando slot ${slot}...`
+            : result?.message || "No pude reconectar ese subbot.",
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
     if (["slots", "espacios", "capacidad"].includes(action)) {
       if (!esOwner) {
         return sock.sendMessage(
@@ -375,6 +421,7 @@ export default {
             `*${prefix}subbot 519xxxxxxxxx*\n` +
             `*${prefix}subbot 3 519xxxxxxxxx*\n` +
             `*${prefix}subbot info 3*\n` +
+            `*${prefix}subbot reconectar 3*\n` +
             `*${prefix}subbot liberar 3*\n` +
             `*${prefix}subbot reset 3*\n` +
             `*${prefix}subbot slots 20*`,

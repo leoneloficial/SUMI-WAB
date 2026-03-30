@@ -5018,6 +5018,92 @@ function runSubbotReservationCleanup() {
   return releasedCount;
 }
 
+async function reconnectManagedSubbot(botId, options = {}) {
+  const targetConfig = getSubbotConfigById(botId);
+  if (!targetConfig) {
+    return {
+      ok: false,
+      status: "missing_bot",
+      message: "No encontre ese subbot.",
+    };
+  }
+
+  const currentSummary = summarizeBotConfig(targetConfig);
+  const hasAnySessionOrAssignment = Boolean(
+    currentSummary.connected ||
+      currentSummary.registered ||
+      currentSummary.pairingPending ||
+      currentSummary.connecting ||
+      getSubbotAssignedNumber(currentSummary)
+  );
+
+  if (!hasAnySessionOrAssignment) {
+    return {
+      ok: false,
+      status: "slot_free",
+      message: `El slot ${targetConfig.slot} esta libre y no necesita reconexion.`,
+    };
+  }
+
+  if (SPLIT_PROCESS_MODE && !ownsBotInThisProcess(targetConfig.id)) {
+    if (PROCESS_BOT_ID !== "main" || !isPm2Environment(process.env)) {
+      return {
+        ok: false,
+        status: "remote_process",
+        message:
+          "Ese subbot corre en otro proceso. Ejecuta la reconexion desde el MAIN o con PM2.",
+      };
+    }
+
+    const processName = getSplitProcessName(targetConfig.id);
+    const restartResult = await runPm2Command(["restart", processName, "--update-env"]);
+
+    if (!restartResult.ok) {
+      return {
+        ok: false,
+        status: "pm2_restart_failed",
+        message:
+          `No pude reiniciar ${processName}. ` +
+          String(restartResult?.stderr || restartResult?.stdout || "Error PM2.").trim(),
+      };
+    }
+
+    await runPm2Command(["save"]);
+    return {
+      ok: true,
+      status: "restarting_process",
+      message: `Reinicie ${processName}. Debe reconectar en unos segundos.`,
+      bot: summarizeBotConfig(getSubbotConfigBySlot(targetConfig.slot) || targetConfig),
+    };
+  }
+
+  const targetState = ensureBotState(targetConfig);
+  const startDecision = evaluateManagedProcessStartDecision(targetState.config, {
+    botState: targetState,
+  });
+
+  if (!startDecision.start) {
+    return {
+      ok: false,
+      status: "not_allowed_now",
+      message:
+        `No puedo reconectar ahora (motivo: ${startDecision.reason}). ` +
+        `Revisa el slot o vuelve a intentar.`,
+    };
+  }
+
+  recycleBotInstance(targetState, String(options?.reason || "owner_reconnect"));
+  scheduleReconnect(targetState, Math.max(800, Number(options?.delayMs || 1200)));
+  writePersistedBotRuntimeState(targetState);
+
+  return {
+    ok: true,
+    status: "reconnecting",
+    message: `Subbot ${targetConfig.slot} entrando en reconexion.`,
+    bot: summarizeBotConfig(getSubbotConfigBySlot(targetConfig.slot) || targetConfig),
+  };
+}
+
 async function listPm2ProcessNames() {
   const result = await runPm2Command(["jlist"]);
   if (!result.ok) {
@@ -6111,6 +6197,9 @@ global.botRuntime = {
       closeSocket: true,
       resetAuthFolder: true,
     });
+  },
+  reconnectSubbot: async (botId, options = {}) => {
+    return reconnectManagedSubbot(botId, options);
   },
   setSubbotMaxSlots: (count) => setSubbotMaxSlots(count),
   getSubbotRequestState: () => buildSubbotRequestState(),
