@@ -6,9 +6,160 @@ import {
   getPrefix,
   getSubbotQuoted,
   hasSubbotRuntime,
+  normalizeNumber,
   parseSlotToken,
   parseSubbotRequestArgs,
 } from "./_shared.js";
+
+function detectRequesterNumber(msg, sender) {
+  const directNumber = normalizeNumber(msg?.senderPhone || msg?.key?.participantPn || "");
+  if (directNumber.length >= 8) {
+    return directNumber;
+  }
+
+  const jidCandidates = [
+    msg?.sender,
+    sender,
+    msg?.key?.participant,
+    msg?.key?.remoteJid,
+  ];
+
+  for (const candidate of jidCandidates) {
+    const raw = String(candidate || "").trim();
+    if (!raw || !raw.endsWith("@s.whatsapp.net")) {
+      continue;
+    }
+
+    const digits = normalizeNumber(raw);
+    if (digits.length >= 8) {
+      return digits;
+    }
+  }
+
+  return "";
+}
+
+async function sendSubbotRequestMenu({
+  sock,
+  from,
+  quoted,
+  prefix,
+  parsed,
+  subbotAccess,
+  chatStatus,
+  esOwner,
+  requesterNumber,
+}) {
+  const maxSlots = Number(subbotAccess?.maxSlots || 15);
+  const slot = Number(parsed?.slot || 0) || 0;
+  const hasAutoNumber = requesterNumber.length >= 8;
+  const autoCommand = hasAutoNumber
+    ? slot
+      ? `${prefix}subbot ${slot} ${requesterNumber}`
+      : `${prefix}subbot ${requesterNumber}`
+    : "";
+  const manualCommand = slot
+    ? `${prefix}subbot ${slot} 51912345678`
+    : `${prefix}subbot 51912345678`;
+
+  const requestRows = [];
+
+  if (hasAutoNumber) {
+    requestRows.push({
+      header: "AUTO",
+      title: slot ? `Pedir codigo slot ${slot}` : "Pedir codigo ahora",
+      description: `Usa tu numero ${requesterNumber}`.slice(0, 72),
+      id: autoCommand,
+    });
+  } else {
+    requestRows.push({
+      header: "MANUAL",
+      title: slot ? `Pedir codigo slot ${slot}` : "Pedir codigo manual",
+      description: "Escribe tu numero con codigo de pais".slice(0, 72),
+      id: manualCommand,
+    });
+  }
+
+  requestRows.push({
+    header: "PANEL",
+    title: "Ver subbots activos",
+    description: "Revisar slots libres y conectados".slice(0, 72),
+    id: `${prefix}subbots`,
+  });
+
+  const sections = [
+    {
+      title: "Solicitud de codigo",
+      rows: requestRows,
+    },
+  ];
+
+  if (esOwner) {
+    const ownerSlot = slot || 1;
+    sections.push({
+      title: "Gestion owner",
+      rows: [
+        {
+          header: "OWNER",
+          title: `Info slot ${ownerSlot}`,
+          description: "Ver estado detallado del slot".slice(0, 72),
+          id: `${prefix}subbot info ${ownerSlot}`,
+        },
+        {
+          header: "OWNER",
+          title: `Liberar slot ${ownerSlot}`,
+          description: "Apaga y libera ese subbot".slice(0, 72),
+          id: `${prefix}subbot liberar ${ownerSlot}`,
+        },
+        {
+          header: "OWNER",
+          title: `Reset slot ${ownerSlot}`,
+          description: "Resetea sesion del subbot".slice(0, 72),
+          id: `${prefix}subbot reset ${ownerSlot}`,
+        },
+        {
+          header: "OWNER",
+          title: "Cambiar capacidad",
+          description: `Ejemplo: ${prefix}subbot slots ${Math.max(20, maxSlots)}`.slice(0, 72),
+          id: `${prefix}subbot slots ${Math.max(20, maxSlots)}`,
+        },
+      ],
+    });
+  }
+
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        text:
+          `Menu rapido de subbot.\n` +
+          `Selecciona una opcion para ejecutar el comando.\n` +
+          `En este chat: ${chatStatus}\n` +
+          `Modo publico: *${subbotAccess?.publicRequests ? "ENCENDIDO" : "APAGADO"}*`,
+        title: "SUBBOT",
+        subtitle: slot ? `Slot seleccionado: ${slot}` : "Seleccion rapida",
+        footer: "FSOCIETY BOT",
+        interactiveButtons: [
+          {
+            name: "single_select",
+            buttonParamsJson: JSON.stringify({
+              title: hasAutoNumber
+                ? `Pedir con ${requesterNumber}`
+                : "Abrir menu subbot",
+              sections,
+            }),
+          },
+        ],
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return true;
+  } catch (error) {
+    console.error("No pude enviar menu interactivo de subbot:", error?.message || error);
+    return false;
+  }
+}
 
 export default {
   name: "subbot",
@@ -235,6 +386,23 @@ export default {
 
     if (!parsed.number) {
       const slotHint = parsed.slot ? ` ${parsed.slot}` : "";
+      const requesterNumber = detectRequesterNumber(msg, sender);
+
+      const sentInteractiveMenu = await sendSubbotRequestMenu({
+        sock,
+        from,
+        quoted,
+        prefix,
+        parsed,
+        subbotAccess,
+        chatStatus,
+        esOwner,
+        requesterNumber,
+      });
+
+      if (sentInteractiveMenu) {
+        return;
+      }
 
       return sock.sendMessage(
         from,
@@ -245,6 +413,9 @@ export default {
             `Ejemplo:\n` +
             `*${prefix}subbot${slotHint} 51xxxxx*\n\n` +
             `Si no eliges slot, el bot usa el primer espacio libre.\n` +
+            (requesterNumber
+              ? `Atajo detectado:\n*${prefix}subbot${slotHint} ${requesterNumber}*\n\n`
+              : "") +
             `En este chat: ${chatStatus}`
         ),
         quoted
