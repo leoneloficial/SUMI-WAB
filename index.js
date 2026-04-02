@@ -98,7 +98,8 @@ const RECONNECT_CODE0_MIN_DELAY_MS = 6000;
 const SUBBOT_RECONNECT_STAGGER_MS = 700;
 const SUBBOT_RECONNECT_STAGGER_MAX_MS = 8000;
 const CONNECTING_LOG_THROTTLE_MS = 8 * 1000;
-const MESSAGE_UPSERT_LOG_THROTTLE_MS = 4 * 1000;
+const MESSAGE_UPSERT_LOG_THROTTLE_MS = 12 * 1000;
+const MESSAGE_UPSERT_SUMMARY_MIN_COUNT = 10;
 const CONTACT_NAME_CACHE_TTL_MS = 10 * 60 * 1000;
 const CONTACT_NAME_CACHE_MAX_ENTRIES = 3000;
 const APPEND_UPSERT_RECENT_WINDOW_MS = 3 * 60 * 1000;
@@ -692,15 +693,37 @@ async function applyConfiguredBotProfile(botState, sock) {
   }
 
   let hadAppStateError = false;
+  const captureProfileError = (kind, error) => {
+    const detail = String(error?.message || error || "").trim();
+    if (!detail) return;
+
+    if (/app state key not present/i.test(detail)) {
+      hadAppStateError = true;
+      return;
+    }
+
+    if (kind === "foto" && /no image processing library available/i.test(detail)) {
+      const now = Date.now();
+      if (now - Number(botState?.lastProfilePhotoLibWarnAt || 0) < 30 * 60 * 1000) {
+        return;
+      }
+      botState.lastProfilePhotoLibWarnAt = now;
+      logBotEvent(
+        botState,
+        "warn",
+        "Foto de perfil omitida: falta libreria de imagen en este hosting"
+      );
+      return;
+    }
+
+    logBotEvent(botState, "warn", `No pude actualizar ${kind} del perfil: ${detail}`);
+  };
 
   if (typeof sock.updateProfileName === "function" && desiredName) {
     try {
       await sock.updateProfileName(desiredName);
     } catch (error) {
-      if (String(error?.message || error).includes("App state key not present")) {
-        hadAppStateError = true;
-      }
-      console.log(`${getBotTag(botState)} No pude actualizar el nombre del perfil: ${error?.message || error}`);
+      captureProfileError("nombre", error);
     }
   }
 
@@ -708,10 +731,7 @@ async function applyConfiguredBotProfile(botState, sock) {
     try {
       await sock.updateProfileStatus(desiredBio);
     } catch (error) {
-      if (String(error?.message || error).includes("App state key not present")) {
-        hadAppStateError = true;
-      }
-      console.log(`${getBotTag(botState)} No pude actualizar la bio del perfil: ${error?.message || error}`);
+      captureProfileError("bio", error);
     }
   }
 
@@ -724,10 +744,7 @@ async function applyConfiguredBotProfile(botState, sock) {
         await sock.updateProfilePicture(sock.user.id, { url: photoSource.path });
       }
     } catch (error) {
-      if (String(error?.message || error).includes("App state key not present")) {
-        hadAppStateError = true;
-      }
-      console.log(`${getBotTag(botState)} No pude actualizar la foto del perfil: ${error?.message || error}`);
+      captureProfileError("foto", error);
     } finally {
       if (photoSource?.temporary) {
         try {
@@ -1712,6 +1729,7 @@ const ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN = parseBooleanEnv(
   "WEB_BRIDGE_ALLOW_LOOPBACK",
   false
 );
+const LOG_COMMAND_LOADS = parseBooleanEnv("LOG_COMMAND_LOADS", false);
 const DASHBOARD_AUTO_ENABLED = parseBooleanEnv("DASHBOARD_ENABLED", false);
 const DASHBOARD_AUTO_PORT = Math.max(
   1,
@@ -2069,33 +2087,28 @@ function logBotEvent(value, level = "info", message = "") {
   const tag = String(config?.label || "BOT")
     .trim()
     .toUpperCase()
-    .padEnd(8, " ")
-    .slice(0, 8);
-  const levelLabel = String(level || "info")
-    .trim()
-    .toUpperCase()
-    .padEnd(7, " ")
-    .slice(0, 7);
-  const baseLine = `${chalk.gray(formatLogTime())} ${chalk.white(tag)} ${chalk.gray(levelLabel)} ${String(
-    message || ""
-  ).trim()}`;
+    .slice(0, 12);
+  const normalizedLevel = String(level || "info").trim().toLowerCase();
+  const messageText = String(message || "").trim();
+  const timeText = chalk.magentaBright(`[${formatLogTime()}]`);
+  const tagText = chalk.cyanBright(`[${tag}]`);
 
-  if (level === "error") {
-    console.log(chalk.redBright(baseLine));
+  if (normalizedLevel === "error") {
+    console.log(`${timeText} ${tagText} ${chalk.redBright("[ERROR]")} ${chalk.redBright(messageText)}`);
     return;
   }
 
-  if (level === "warn") {
-    console.log(chalk.yellowBright(baseLine));
+  if (normalizedLevel === "warn") {
+    console.log(`${timeText} ${tagText} ${chalk.yellowBright("[WARN ]")} ${chalk.yellowBright(messageText)}`);
     return;
   }
 
-  if (level === "success") {
-    console.log(chalk.greenBright(baseLine));
+  if (normalizedLevel === "success") {
+    console.log(`${timeText} ${tagText} ${chalk.greenBright("[ OK  ]")} ${chalk.greenBright(messageText)}`);
     return;
   }
 
-  console.log(chalk.cyanBright(baseLine));
+  console.log(`${timeText} ${tagText} ${chalk.blueBright("[INFO ]")} ${chalk.cyanBright(messageText)}`);
 }
 
 function createStoreForBot(botId) {
@@ -2599,22 +2612,28 @@ function getReconnectDelay(botState, options = false) {
 function logMessageUpsertEvent(botState, type, count) {
   const now = Date.now();
   const normalizedCount = Math.max(0, Number(count || 0));
+  const typeLabel = String(type || "unknown").trim().toLowerCase() || "unknown";
   const elapsed = now - Number(botState?.lastUpsertLogAt || 0);
+  botState.suppressedUpsertCount = Number(botState?.suppressedUpsertCount || 0) + normalizedCount;
+  botState.lastUpsertType = typeLabel;
 
   if (elapsed < MESSAGE_UPSERT_LOG_THROTTLE_MS) {
-    botState.suppressedUpsertCount = Number(botState?.suppressedUpsertCount || 0) + normalizedCount;
     return;
   }
 
-  const suppressed = Number(botState?.suppressedUpsertCount || 0);
+  const totalInWindow = Number(botState?.suppressedUpsertCount || 0);
   botState.suppressedUpsertCount = 0;
   botState.lastUpsertLogAt = now;
 
-  const extra = suppressed > 0 ? ` | +${suppressed} suprimidos` : "";
+  if (totalInWindow < MESSAGE_UPSERT_SUMMARY_MIN_COUNT) {
+    return;
+  }
+
+  const seconds = Math.max(1, Math.round(elapsed / 1000));
   logBotEvent(
     botState,
     "info",
-    `messages.upsert type=${String(type || "unknown")} count=${normalizedCount}${extra}`
+    `Actividad mensajes: +${totalInWindow} eventos (${botState.lastUpsertType}) en ${seconds}s`
   );
 }
 
@@ -4743,7 +4762,7 @@ function banner() {
     : String(settings.prefix || ".");
   const nowText = new Date().toLocaleString();
   const terminalWidth = Number(process.stdout?.columns || 0);
-  const bodyWidth = Math.max(76, Math.min(110, terminalWidth > 0 ? terminalWidth - 2 : 92));
+  const bodyWidth = Math.max(78, Math.min(116, terminalWidth > 0 ? terminalWidth - 2 : 98));
 
   const frame = {
     top: `+${"=".repeat(bodyWidth - 2)}+`,
@@ -4759,18 +4778,20 @@ function banner() {
   };
 
   const printField = (label, value) => {
-    const cleanLabel = String(label || "").trim().padEnd(12, " ");
-    const wrapWidth = Math.max(16, bodyWidth - 20);
+    const cleanLabel = String(label || "").trim().toUpperCase().padEnd(12, " ");
+    const wrapWidth = Math.max(16, bodyWidth - 22);
     const lines = wrapConsoleText(String(value || "-"), wrapWidth);
     lines.forEach((line, index) => {
       const left = index === 0 ? cleanLabel : " ".repeat(cleanLabel.length);
-      console.log(chalk.white(padLine(`${left} ${line}`)));
+      const row = padLine(`${left} ${line}`);
+      console.log(chalk.blueBright(row));
     });
   };
 
-  console.log(chalk.cyanBright(frame.top));
-  console.log(chalk.cyanBright(padLine(`FSOCIETY CONTROL PANEL :: ${botName}`)));
-  console.log(chalk.cyanBright(frame.mid));
+  console.log(chalk.magentaBright(frame.top));
+  console.log(chalk.magentaBright(padLine(`FSOCIETY CYBER CONSOLE :: ${botName}`)));
+  console.log(chalk.magentaBright(padLine(`THEME=NEON-2 :: READY`)));
+  console.log(chalk.magentaBright(frame.mid));
   printField("Owner", ownerName);
   printField("Prefijos", prefixValue);
   printField("Comandos", String(comandos.size));
@@ -4778,7 +4799,7 @@ function banner() {
   printField("Maneja", managedLabels);
   printField("Habilitados", activeConfigLabels);
   printField("Inicio", nowText);
-  console.log(chalk.cyanBright(frame.bottom));
+  console.log(chalk.magentaBright(frame.bottom));
 }
 
 // ================= CARGAR COMANDOS =================
@@ -4831,7 +4852,9 @@ async function cargarComandos() {
           comandos.set(String(nombre).toLowerCase(), cmd);
         }
 
-        console.log("Comando cargado:", nombres.join(", "));
+        if (LOG_COMMAND_LOADS) {
+          console.log("Comando cargado:", nombres.join(", "));
+        }
       } catch (err) {
         console.error("Error cargando comando:", ruta, err);
       }
