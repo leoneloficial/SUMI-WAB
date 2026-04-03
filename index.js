@@ -1300,6 +1300,99 @@ function extractCommandData(text, currentSettings) {
   };
 }
 
+const GLOBAL_COMMAND_ALIAS_MAP = new Map([
+  // sistema
+  ["ayuda", "menu"],
+  ["comandos", "menu"],
+  ["panel", "menu"],
+  ["saludbot", "healthbot"],
+  ["salud", "healthbot"],
+  ["estadosalud", "healthbot"],
+  ["panelgrupo", "gpanel"],
+  ["paneladmin", "gpanel"],
+  ["adminpanel", "gpanel"],
+  ["botpanel", "controlbot"],
+  ["controlbot", "controlbot"],
+  ["panelbot", "controlbot"],
+  ["antierrorvisible", "antierror"],
+  ["errores", "logs"],
+  ["respaldo", "backup"],
+  ["restaurar", "restore"],
+  ["tablero", "dashboard"],
+  ["difusion", "broadcast"],
+  ["limpiarlogs", "clearlogs"],
+  ["manten", "mantenimiento"],
+  ["actualizar", "update"],
+  ["reiniciar", "restart"],
+
+  // grupo
+  ["bienvenida", "welcome"],
+  ["despedida", "welcome"],
+  ["estadogrupo", "estadogrupo"],
+  ["configuraciongrupo", "estadogrupo"],
+  ["ascender", "promote"],
+  ["degradar", "demote"],
+  ["cerrargrupo", "grupo"],
+  ["abrirgrupo", "grupo"],
+  ["lista blanca", "whitelist"],
+  ["listablanca", "whitelist"],
+
+  // descargas y busqueda
+  ["descargatiktok", "tiktok"],
+  ["descargayoutube", "ytmp4"],
+  ["audioyoutube", "ytmp3"],
+  ["videoyoutube", "ytmp4"],
+  ["buscaryoutube", "ytsearch"],
+  ["buscartiktok", "ttsearch"],
+  ["perfiltiktok", "tiktokusuario"],
+  ["cancion", "play"],
+  ["descargarapk", "apk"],
+  ["descargarmediafire", "mediafire"],
+  ["descargarmega", "mega"],
+  ["descargarwindows", "windows"],
+  ["descargarmac", "mac"],
+  ["descargarspotify", "spotify"],
+
+  // economia
+  ["trabajo", "work"],
+  ["diario", "daily"],
+  ["tienda", "shop"],
+  ["comprar", "buy"],
+  ["comprarsolicitud", "buyrequests"],
+  ["misolicitudes", "solicitudes"],
+  ["rankdinero", "topdolares"],
+  ["ranksolicitudes", "topsolicitudes"],
+  ["enviardinero", "transferir"],
+  ["saldo", "dolares"],
+  ["cartera", "dolares"],
+
+  // utilidades/ia
+  ["traductor", "traducir"],
+  ["traduccion", "traducir"],
+  ["resumir", "resumen"],
+  ["ia", "gpt5"],
+  ["chat", "gpt5"],
+
+  // juegos
+  ["juego", "juegos"],
+  ["menujuego", "juegos"],
+  ["piedrapapeltijera", "ppt"],
+  ["ruletarusa", "ruleta"],
+  ["adivinar", "adivina"],
+]);
+
+function applyGlobalCommandAliases() {
+  for (const [aliasName, canonicalName] of GLOBAL_COMMAND_ALIAS_MAP.entries()) {
+    const alias = String(aliasName || "").trim().toLowerCase();
+    const canonical = String(canonicalName || "").trim().toLowerCase();
+    if (!alias || !canonical) continue;
+    if (comandos.has(alias)) continue;
+    const target = comandos.get(canonical);
+    if (!target) continue;
+    comandos.set(alias, target);
+  }
+}
+
 function buildMainBotConfig(currentSettings) {
   const mainAuthFolder =
     String(currentSettings?.authFolder || DEFAULT_AUTH_FOLDER).trim() ||
@@ -5462,6 +5555,7 @@ async function cargarComandos() {
   }
 
   await leer(base);
+  applyGlobalCommandAliases();
 }
 
 // ================= PAIRING =================
