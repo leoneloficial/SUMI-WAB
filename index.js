@@ -107,6 +107,11 @@ const CONTACT_NAME_CACHE_MAX_ENTRIES = 3000;
 const APPEND_UPSERT_RECENT_WINDOW_MS = 3 * 60 * 1000;
 const MESSAGE_DEDUP_TTL_MS = 10 * 60 * 1000;
 const MESSAGE_DEDUP_MAX_ENTRIES = 4000;
+const DEFAULT_PAIRING_COUNTRY_CODE = String(
+  process.env.PAIRING_COUNTRY_CODE || process.env.DEFAULT_COUNTRY_CODE || "51"
+)
+  .replace(/\D/g, "")
+  .slice(0, 4);
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
@@ -579,6 +584,29 @@ function getBotSlot(botId = "") {
 
 function sanitizePhoneNumber(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function normalizePairingPhoneNumber(value) {
+  let digits = sanitizePhoneNumber(value);
+  if (!digits) return "";
+
+  if (digits.startsWith("00") && digits.length > 2) {
+    digits = digits.slice(2);
+  }
+
+  if (digits.startsWith("0") && digits.length >= 10) {
+    digits = digits.replace(/^0+/, "");
+  }
+
+  if (digits.length === 9 && DEFAULT_PAIRING_COUNTRY_CODE) {
+    digits = `${DEFAULT_PAIRING_COUNTRY_CODE}${digits}`;
+  }
+
+  if (digits.length < 10 || digits.length > 15) {
+    return "";
+  }
+
+  return digits;
 }
 
 function resolveConfiguredBotName(config = {}) {
@@ -3942,7 +3970,7 @@ async function sendPanelPairingUpdate(callbackUrl, callbackToken, payload) {
 
 async function processInternalSubbotRequest(payload = {}) {
   const requestToken = String(payload?.requestToken || "").trim();
-  const phoneNumber = sanitizePhoneNumber(payload?.phoneNumber);
+  const phoneNumber = normalizePairingPhoneNumber(payload?.phoneNumber);
 
   if (!requestToken || !phoneNumber) {
     return {
@@ -4615,7 +4643,9 @@ async function handleBridgeRequest(req, res, requestUrl) {
 
   if (pathname === "/bridge/subbot-request" && req.method === "POST") {
     const body = await readJsonRequestBody(req);
-    const numero = sanitizePhoneNumber(body?.numero || body?.number || body?.requesterNumber);
+  const numero = normalizePairingPhoneNumber(
+    body?.numero || body?.number || body?.requesterNumber
+  );
     const usuario = String(body?.usuario || "web-user").trim() || "web-user";
     const slot = Number.parseInt(String(body?.slot || ""), 10);
     const runtime = global.botRuntime;
@@ -4733,7 +4763,7 @@ function ensureDashboardServer() {
           }
 
           const body = await readJsonBody(req);
-          const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
+          const phoneNumber = normalizePairingPhoneNumber(body?.phoneNumber);
           const forceRelink = body?.forceRelink === true;
           const useCache = body?.useCache !== false;
           const mainState =
@@ -4835,7 +4865,7 @@ function ensureDashboardServer() {
         try {
           const body = await readJsonBody(req);
           const requestToken = String(body?.requestToken || "").trim();
-          const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
+          const phoneNumber = normalizePairingPhoneNumber(body?.phoneNumber);
 
           if (!requestToken || !phoneNumber) {
             writeJson(res, 400, {
@@ -6685,12 +6715,12 @@ async function requestPairingCode(botState, options = {}) {
     };
   }
 
-  const explicitNumber = sanitizePhoneNumber(number);
+  const explicitNumber = normalizePairingPhoneNumber(number);
   const cached = getCachedPairingCode(botState);
   const shouldForceRefresh =
     useCache === false ||
     (explicitNumber &&
-      explicitNumber !== sanitizePhoneNumber(cached?.number || ""));
+      explicitNumber !== normalizePairingPhoneNumber(cached?.number || ""));
 
   if (cached && !shouldForceRefresh) {
     return {
@@ -6711,11 +6741,11 @@ async function requestPairingCode(botState, options = {}) {
   }
 
   let resolvedNumber =
-    explicitNumber || sanitizePhoneNumber(botState.config?.pairingNumber);
+    explicitNumber || normalizePairingPhoneNumber(botState.config?.pairingNumber);
 
   if (!resolvedNumber && allowPrompt) {
     console.log(`${getBotTag(botState)} Bot no vinculado`);
-    resolvedNumber = sanitizePhoneNumber(
+    resolvedNumber = normalizePairingPhoneNumber(
       await preguntarSeguro(
         `Numero del ${botState.config.label} con codigo de pais, sin + ni espacios: `
       )
@@ -6734,8 +6764,8 @@ async function requestPairingCode(botState, options = {}) {
       ok: false,
       status: "missing_number",
       message:
-        `Primero vincula el bot principal por consola y luego usa ` +
-        `${prefix}subbot${slotHint} 519xxxxxxxxx para pedir el codigo.`,
+        `Debes enviar un numero valido con codigo de pais (10 a 15 digitos). ` +
+        `Ejemplo: ${prefix}subbot${slotHint} 51912345678`,
     };
   }
 
@@ -6902,6 +6932,7 @@ async function requestPairingCodeSafe(botState) {
   if (result.ok) {
     console.log(`\nCODIGO DE VINCULACION ${result.label}:\n`);
     console.log(chalk.greenBright(result.code));
+    console.log(chalk.cyan(`Numero objetivo: +${result.number || "sin_numero"}`));
     console.log(
       chalk.yellow(
         "WhatsApp > Dispositivos vinculados > Vincular con numero de telefono"
