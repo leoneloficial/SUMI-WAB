@@ -1,8 +1,10 @@
 const TEST_HOST = "https://speed.cloudflare.com";
 const TRACE_HOST = "https://1.1.1.1/cdn-cgi/trace";
+
 const PING_SAMPLES = 3;
 const DEFAULT_DOWNLOAD_BYTES = 16_000_000;
 const DEFAULT_UPLOAD_BYTES = 4_000_000;
+
 const REQUEST_TIMEOUT_MS = 45_000;
 const TRACE_TIMEOUT_MS = 8_000;
 
@@ -24,7 +26,8 @@ const CF_HEADERS = {
 const DOWNLOAD_FALLBACKS = [
   {
     name: "Cloudflare",
-    buildUrl: (bytesWanted) => `${TEST_HOST}/__down?bytes=${bytesWanted}&r=${Date.now()}`,
+    buildUrl: (bytesWanted) =>
+      `${TEST_HOST}/__down?bytes=${bytesWanted}&r=${Date.now()}`,
     headers: CF_HEADERS,
   },
   {
@@ -67,32 +70,9 @@ const UPLOAD_FALLBACKS = [
 
 let activeSpeedtest = null;
 
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${value} B`;
-}
-
-function formatMbps(bytes, ms) {
-  const totalMs = Math.max(1, Number(ms || 0));
-  const mbps = ((Number(bytes || 0) * 8) / (totalMs / 1000)) / 1_000_000;
-  return `${mbps.toFixed(2)} Mbps`;
-}
-
-function formatMs(value) {
-  return `${Number(value || 0).toFixed(0)} ms`;
-}
-
 function average(values = []) {
   if (!values.length) return 0;
   return values.reduce((sum, current) => sum + current, 0) / values.length;
-}
-
-function clampNumber(value, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return min;
-  return Math.min(max, Math.max(min, n));
 }
 
 function stdDev(values = []) {
@@ -102,9 +82,34 @@ function stdDev(values = []) {
   return Math.sqrt(variance);
 }
 
-function formatPercent(value) {
-  const v = clampNumber(value, 0, 100);
-  return `${v.toFixed(0)}%`;
+function clampNumber(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+function formatMs(value) {
+  return `${Number(value || 0).toFixed(0)} ms`;
+}
+
+function formatMbps(bytes, ms) {
+  const totalMs = Math.max(1, Number(ms || 0));
+  const mbps = ((Number(bytes || 0) * 8) / (totalMs / 1000)) / 1_000_000;
+  return `${mbps.toFixed(2)} Mbps`;
+}
+
+function parseMbps(label = "") {
+  const match = String(label).match(/([\d.]+)\s*Mbps/i);
+  if (!match?.[1]) return 0;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function buildBar(percent, size = 16) {
+  const pct = clampNumber(percent, 0, 100);
+  const total = Math.max(8, Math.min(30, Number(size || 16)));
+  const filled = Math.round((pct / 100) * total);
+  return "█".repeat(filled) + "░".repeat(Math.max(0, total - filled));
 }
 
 async function readResponseBytes(response) {
@@ -127,9 +132,7 @@ async function readResponseBytes(response) {
 
 async function readResponseBytesLimited(response, limitBytes) {
   const limit = Number(limitBytes || 0);
-  if (!limit || limit <= 0) {
-    return await readResponseBytes(response);
-  }
+  if (!limit || limit <= 0) return readResponseBytes(response);
 
   if (!response?.body?.getReader) {
     const payload = await response.arrayBuffer();
@@ -142,7 +145,9 @@ async function readResponseBytesLimited(response, limitBytes) {
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+
     total += value?.byteLength || 0;
+
     if (total >= limit) {
       try {
         await reader.cancel();
@@ -161,9 +166,10 @@ async function runTimedFetch(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) 
 
   try {
     const headers = {
-      ...(DEFAULT_HEADERS || {}),
-      ...(options?.headers || {}),
+      ...DEFAULT_HEADERS,
+      ...(options.headers || {}),
     };
+
     const response = await fetch(url, {
       ...options,
       headers,
@@ -186,9 +192,14 @@ async function measurePing() {
 
   for (let index = 0; index < PING_SAMPLES; index += 1) {
     try {
-      const query = `${TEST_HOST}/__down?bytes=1&r=${Date.now()}-${index}`;
-      const { response, startedAt } = await runTimedFetch(query, { method: "GET", headers: CF_HEADERS });
-      await readResponseBytesLimited(response, 8_192);
+      const url = `${TEST_HOST}/__down?bytes=1&r=${Date.now()}-${index}`;
+      const { response, startedAt } = await runTimedFetch(
+        url,
+        { method: "GET", headers: CF_HEADERS }
+      );
+
+      await readResponseBytesLimited(response, 8192);
+
       const endedAt = process.hrtime.bigint();
       samples.push(Number(endedAt - startedAt) / 1_000_000);
     } catch {
@@ -199,31 +210,33 @@ async function measurePing() {
 
   if (useFallback) {
     samples.length = 0;
+
     for (let index = 0; index < PING_SAMPLES; index += 1) {
-      const query = `${TRACE_HOST}?r=${Date.now()}-${index}`;
+      const url = `${TRACE_HOST}?r=${Date.now()}-${index}`;
       const { response, startedAt } = await runTimedFetch(
-        query,
+        url,
         { method: "GET", headers: DEFAULT_HEADERS },
         TRACE_TIMEOUT_MS
       );
-      await readResponseBytesLimited(response, 8_192);
+
+      await readResponseBytesLimited(response, 8192);
+
       const endedAt = process.hrtime.bigint();
       samples.push(Number(endedAt - startedAt) / 1_000_000);
     }
   }
 
-  const jitter = stdDev(samples);
   return {
     samples,
     averageMs: average(samples),
     bestMs: Math.min(...samples),
-    jitterMs: jitter,
+    jitterMs: stdDev(samples),
   };
 }
 
 async function measureDownload(bytesToDownload) {
   const bytesWanted = Math.max(1_000_000, Number(bytesToDownload || DEFAULT_DOWNLOAD_BYTES));
-  let lastError = "No pude medir descarga.";
+  let lastError = "No pude medir la descarga.";
 
   for (const provider of DOWNLOAD_FALLBACKS) {
     try {
@@ -234,7 +247,11 @@ async function measureDownload(bytesToDownload) {
         headers.range = `bytes=0-${bytesWanted - 1}`;
       }
 
-      const { response, startedAt } = await runTimedFetch(url, { method: "GET", headers });
+      const { response, startedAt } = await runTimedFetch(url, {
+        method: "GET",
+        headers,
+      });
+
       const bytes = await readResponseBytesLimited(response, bytesWanted);
       const endedAt = process.hrtime.bigint();
       const elapsedMs = Number(endedAt - startedAt) / 1_000_000;
@@ -242,21 +259,18 @@ async function measureDownload(bytesToDownload) {
       return {
         ok: true,
         provider: provider.name,
-        sourceUrl: url,
         bytes,
         elapsedMs,
         speedLabel: formatMbps(bytes, elapsedMs),
       };
     } catch (error) {
       lastError = `${provider.name}: ${error?.message || error}`;
-      continue;
     }
   }
 
   return {
     ok: false,
     provider: "",
-    sourceUrl: "",
     bytes: 0,
     elapsedMs: 0,
     speedLabel: "0.00 Mbps",
@@ -266,10 +280,9 @@ async function measureDownload(bytesToDownload) {
 
 async function measureUpload(bytesToUpload) {
   const bytesWanted = Math.max(500_000, Number(bytesToUpload || DEFAULT_UPLOAD_BYTES));
-  // Evita que algunos endpoints bloqueen cargas grandes.
   const payloadSize = clampNumber(bytesWanted, 500_000, 4_000_000);
   const payload = Buffer.alloc(payloadSize, 97);
-  let lastError = "No pude medir subida.";
+  let lastError = "No pude medir la subida.";
 
   for (const provider of UPLOAD_FALLBACKS) {
     try {
@@ -287,27 +300,25 @@ async function measureUpload(bytesToUpload) {
       });
 
       await response.text();
+
       const endedAt = process.hrtime.bigint();
       const elapsedMs = Number(endedAt - startedAt) / 1_000_000;
 
       return {
         ok: true,
         provider: provider.name,
-        sourceUrl: url,
         bytes: payload.length,
         elapsedMs,
         speedLabel: formatMbps(payload.length, elapsedMs),
       };
     } catch (error) {
       lastError = `${provider.name}: ${error?.message || error}`;
-      continue;
     }
   }
 
   return {
     ok: false,
     provider: "",
-    sourceUrl: "",
     bytes: payload.length,
     elapsedMs: 0,
     speedLabel: "0.00 Mbps",
@@ -315,39 +326,11 @@ async function measureUpload(bytesToUpload) {
   };
 }
 
-function parseMbps(label = "") {
-  const match = String(label || "").match(/([\d.]+)\s*Mbps/i);
-  if (!match?.[1]) return 0;
-  const v = Number(match[1]);
-  return Number.isFinite(v) ? v : 0;
-}
-
-function buildBar(valuePct, size = 18) {
-  const pct = clampNumber(valuePct, 0, 100);
-  const total = Math.max(8, Math.min(30, Number(size || 18)));
-  const filled = Math.round((pct / 100) * total);
-  return "█".repeat(filled) + "░".repeat(Math.max(0, total - filled));
-}
-
-function padRight(text, width) {
-  const raw = String(text ?? "");
-  if (raw.length >= width) return raw.slice(0, width);
-  return raw + " ".repeat(width - raw.length);
-}
-
-function box(lines = [], width = 64) {
-  const w = Math.max(40, Math.min(80, Number(width || 64)));
-  const top = `┏${"━".repeat(w - 2)}┓`;
-  const mid = `┣${"━".repeat(w - 2)}┫`;
-  const bottom = `┗${"━".repeat(w - 2)}┛`;
-  const body = lines.map((line) => `┃${padRight(line, w - 2)}┃`).join("\n");
-  return [top, body, bottom].join("\n");
-}
-
 async function executeSpeedtest(options = {}) {
   const startedAt = Date.now();
-  const downloadBytes = Number(options?.downloadBytes || DEFAULT_DOWNLOAD_BYTES);
-  const uploadBytes = Number(options?.uploadBytes || DEFAULT_UPLOAD_BYTES);
+  const downloadBytes = Number(options.downloadBytes || DEFAULT_DOWNLOAD_BYTES);
+  const uploadBytes = Number(options.uploadBytes || DEFAULT_UPLOAD_BYTES);
+
   const ping = await measurePing();
   const download = await measureDownload(downloadBytes);
   const upload = await measureUpload(uploadBytes);
@@ -362,21 +345,12 @@ async function executeSpeedtest(options = {}) {
 }
 
 function buildOwnerContact(settings = {}) {
-  const ownerName = String(settings.ownerName || "DVYER").trim();
-  const ownerNumber =
-    Array.isArray(settings.ownerNumbers) && settings.ownerNumbers.length
-      ? String(settings.ownerNumbers[0]).trim()
-      : String(settings.ownerNumber || settings.ownerPhone || "").trim();
-
-  if (ownerNumber) return `${ownerName} · ${ownerNumber}`;
-  return ownerName;
+  return String(settings.ownerName || "DVYER").trim();
 }
 
 function buildResultMessage(result, modeLabel = "NORMAL", contactText = "") {
-  const totalTimeMs = Math.max(0, Number(result?.finishedAt || 0) - Number(result?.startedAt || 0));
-
-  const dlOk = result?.download?.ok !== false;
-  const ulOk = result?.upload?.ok !== false;
+  const totalTimeMs =
+    Math.max(0, Number(result?.finishedAt || 0) - Number(result?.startedAt || 0));
 
   const dl = parseMbps(result?.download?.speedLabel);
   const ul = parseMbps(result?.upload?.speedLabel);
@@ -385,25 +359,35 @@ function buildResultMessage(result, modeLabel = "NORMAL", contactText = "") {
 
   const dlPct = clampNumber((dl / 300) * 100, 0, 100);
   const ulPct = clampNumber((ul / 150) * 100, 0, 100);
-  const pingPct = clampNumber(((300 - Math.min(300, ping)) / 300) * 100, 0, 100);
-  const jitterPct = clampNumber(((100 - Math.min(100, jitter)) / 100) * 100, 0, 100);
-
-  const header = `⟦ SPEEDTEST ⟧  Estado: ONLINE  Modo: ${modeLabel}`;
-  const sources = `DL: ${result?.download?.provider || "?"}  |  UL: ${result?.upload?.provider || "?"}`;
-  const time = `Duración: ${formatMs(totalTimeMs)}  |  Muestras ping: ${PING_SAMPLES}`;
 
   const lines = [
-    "⚡ SPEEDTEST SIMPLE",
-    `Modo: ${modeLabel}`,
-    `Descarga: ${result?.download?.speedLabel || "0.00 Mbps"}${dlOk ? "" : " ⚠️"}`,
-    `Subida: ${result?.upload?.speedLabel || "0.00 Mbps"}${ulOk ? "" : " ⚠️"}`,
-    `Ping: ${formatMs(ping)} | Jitter: ${formatMs(jitter)}`,
-    `Fuentes: DL ${result?.download?.provider || "?"} | UL ${result?.upload?.provider || "?"}`,
-    `Duración: ${formatMs(totalTimeMs)} · ${PING_SAMPLES} muestras`,
+    "⚡ *SPEEDTEST COMPLETADO*",
+    "",
+    `🧪 Modo: *${modeLabel}*`,
+    `📥 Descarga: *${result?.download?.speedLabel || "0.00 Mbps"}*`,
+    `${buildBar(dlPct)} ${dlPct.toFixed(0)}%`,
+    "",
+    `📤 Subida: *${result?.upload?.speedLabel || "0.00 Mbps"}*`,
+    `${buildBar(ulPct)} ${ulPct.toFixed(0)}%`,
+    "",
+    `📶 Ping: *${formatMs(ping)}*`,
+    `〰️ Jitter: *${formatMs(jitter)}*`,
+    "",
+    `🌐 Proveedores: DL ${result?.download?.provider || "?"} | UL ${result?.upload?.provider || "?"}`,
+    `⏱️ Duración total: *${formatMs(totalTimeMs)}*`,
+    `📊 Muestras de ping: *${PING_SAMPLES}*`,
   ];
 
   if (contactText) {
-    lines.push(`Contacto: ${contactText}`);
+    lines.push(`👤 Owner: *${contactText}*`);
+  }
+
+  if (result?.download?.ok === false) {
+    lines.push(`⚠️ Error descarga: ${result.download.error || "desconocido"}`);
+  }
+
+  if (result?.upload?.ok === false) {
+    lines.push(`⚠️ Error subida: ${result.upload.error || "desconocido"}`);
   }
 
   return lines.join("\n");
@@ -412,11 +396,41 @@ function buildResultMessage(result, modeLabel = "NORMAL", contactText = "") {
 function buildErrorMessage(error, contactText = "") {
   const message = String(error?.message || error || "Error desconocido");
   const lines = [
-    "Speedtest no se completó.",
+    "❌ *Speedtest no se completó*",
     `Motivo: ${message}`,
   ];
-  if (contactText) lines.push(`Contacto: ${contactText}`);
+
+  if (contactText) {
+    lines.push(`👤 Owner: *${contactText}*`);
+  }
+
   return lines.join("\n");
+}
+
+function resolveMode(args = []) {
+  const mode = String(args?.[0] || "").trim().toLowerCase();
+
+  if (["full", "pro", "completo"].includes(mode)) {
+    return {
+      modeLabel: "COMPLETO",
+      downloadBytes: 40_000_000,
+      uploadBytes: 12_000_000,
+    };
+  }
+
+  if (["lite", "rapido", "fast"].includes(mode)) {
+    return {
+      modeLabel: "RAPIDO",
+      downloadBytes: 8_000_000,
+      uploadBytes: 2_000_000,
+    };
+  }
+
+  return {
+    modeLabel: "NORMAL",
+    downloadBytes: DEFAULT_DOWNLOAD_BYTES,
+    uploadBytes: DEFAULT_UPLOAD_BYTES,
+  };
 }
 
 export default {
@@ -430,25 +444,20 @@ export default {
       return sock.sendMessage(
         from,
         {
-          text: "Ya hay un speedtest en progreso. Espera a que termine.",
+          text: "⏳ Ya hay un speedtest en progreso. Espera a que termine.",
           ...global.channelInfo,
         },
         { quoted: msg }
       );
     }
 
-    const mode = String(args?.[0] || "").trim().toLowerCase();
-    const isFull = mode === "full" || mode === "pro" || mode === "completo";
-    const isLite = mode === "lite" || mode === "rapido" || mode === "fast";
-    const modeLabel = isFull ? "COMPLETO" : isLite ? "RAPIDO" : "NORMAL";
-    const downloadBytes = isFull ? 40_000_000 : isLite ? 8_000_000 : DEFAULT_DOWNLOAD_BYTES;
-    const uploadBytes = isFull ? 12_000_000 : isLite ? 2_000_000 : DEFAULT_UPLOAD_BYTES;
+    const { modeLabel, downloadBytes, uploadBytes } = resolveMode(args);
+    const ownerName = buildOwnerContact(settings);
 
-    const contactInfo = buildOwnerContact(settings);
     await sock.sendMessage(
       from,
       {
-        text: `⚡ Speedtest ${modeLabel} · contacto: ${contactInfo}`,
+        text: `⚡ Iniciando speedtest *${modeLabel}*...\n👤 Owner: *${ownerName}*`,
         ...global.channelInfo,
       },
       { quoted: msg }
@@ -458,10 +467,13 @@ export default {
 
     try {
       const result = await activeSpeedtest;
-      const contactInfo = buildOwnerContact(settings);
+
       return sock.sendMessage(
         from,
-        { text: buildResultMessage(result, modeLabel, contactInfo), ...global.channelInfo },
+        {
+          text: buildResultMessage(result, modeLabel, ownerName),
+          ...global.channelInfo,
+        },
         { quoted: msg }
       );
     } catch (error) {
@@ -470,7 +482,7 @@ export default {
       return sock.sendMessage(
         from,
         {
-          text: buildErrorMessage(error, buildOwnerContact(settings)),
+          text: buildErrorMessage(error, ownerName),
           ...global.channelInfo,
         },
         { quoted: msg }
