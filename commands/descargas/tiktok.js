@@ -116,6 +116,13 @@ function pickApiDownloadUrl(data) {
   );
 }
 
+function isTrustedInternalUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return false;
+  if (value.startsWith("/")) return true;
+  return value.startsWith(`${API_BASE}/`);
+}
+
 function extractTextFromMessage(message) {
   return (
     message?.text ||
@@ -318,21 +325,22 @@ async function downloadTikTokViaApi(videoUrl, fileName, qualityHint, directUrl =
   };
 
   const normalizedDirectUrl = normalizeApiUrl(directUrl);
+  const canUseDirectUrl = isTrustedInternalUrl(normalizedDirectUrl);
   let response;
   try {
     response = await axios.get(
-      normalizedDirectUrl || API_TIKTOK_URL,
-      buildRequestConfig(Boolean(normalizedDirectUrl))
+      canUseDirectUrl ? normalizedDirectUrl : API_TIKTOK_URL,
+      buildRequestConfig(canUseDirectUrl)
     );
   } catch (error) {
-    if (!normalizedDirectUrl) {
+    if (!canUseDirectUrl) {
       throw error;
     }
     response = await axios.get(API_TIKTOK_URL, buildRequestConfig(false));
   }
 
   if (response.status >= 400) {
-    if (normalizedDirectUrl) {
+    if (canUseDirectUrl) {
       response = await axios.get(API_TIKTOK_URL, buildRequestConfig(false));
     }
   }
@@ -350,6 +358,20 @@ async function downloadTikTokViaApi(videoUrl, fileName, qualityHint, directUrl =
         parsed || { message: errorText || "Error al descargar el video." },
         response.status
       )
+    );
+  }
+
+  const contentType = String(response.headers?.["content-type"] || "").toLowerCase();
+  if (contentType.includes("text/html")) {
+    if (canUseDirectUrl) {
+      response = await axios.get(API_TIKTOK_URL, buildRequestConfig(false));
+    }
+  }
+
+  const fallbackContentType = String(response.headers?.["content-type"] || "").toLowerCase();
+  if (fallbackContentType.includes("text/html")) {
+    throw new Error(
+      "El proveedor de TikTok devolvio pagina de verificacion (Cloudflare). Reintenta en unos segundos."
     );
   }
 
