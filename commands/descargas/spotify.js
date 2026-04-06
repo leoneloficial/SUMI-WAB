@@ -44,6 +44,12 @@ if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
+function ensureTmpDir() {
+  try {
+    fs.mkdirSync(TMP_DIR, { recursive: true });
+  } catch {}
+}
+
 function apiBaseLabel() {
   const configured = String(getDvyerBaseUrl() || "")
     .trim()
@@ -936,6 +942,7 @@ async function downloadSpotifyAudio(downloadUrl, outputPath, suggestedFileName =
     }
   });
 
+  ensureTmpDir();
   const outputStream = fs.createWriteStream(outputPath);
   const releaseAbort = bindAbort(signal, () => {
     const abortError = buildAbortError(signal);
@@ -1267,6 +1274,7 @@ export default {
       );
 
       const stamp = Date.now();
+      ensureTmpDir();
       rawAudioPath = path.join(TMP_DIR, `${stamp}-spotify-source.bin`);
       finalMp3Path = path.join(TMP_DIR, `${stamp}-spotify-final.mp3`);
 
