@@ -92,6 +92,21 @@ function extractApiError(data, status) {
   );
 }
 
+function toFriendlyTikTokError(error) {
+  const raw = String(error?.message || error || "").trim();
+  const lower = raw.toLowerCase();
+
+  if (
+    lower.includes("<!doctype html") ||
+    lower.includes("just a moment") ||
+    lower.includes("enable javascript and cookies")
+  ) {
+    return "El proveedor de TikTok activo esta protegido temporalmente. Reintenta en 20-40 segundos.";
+  }
+
+  return raw || "No se pudo procesar el video.";
+}
+
 function normalizeApiUrl(url) {
   const value = String(url || "").trim();
   if (!value) return "";
@@ -556,7 +571,7 @@ export default {
       cooldowns.delete(userId);
 
       await sock.sendMessage(from, {
-        text: `❌ ${String(err?.message || "No se pudo procesar el video.")}`,
+        text: `❌ ${toFriendlyTikTokError(err)}`,
         ...global.channelInfo,
       });
     } finally {
