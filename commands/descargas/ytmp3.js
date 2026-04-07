@@ -117,6 +117,10 @@ function extractApiError(data, status) {
   );
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function apiGet(url, params, signal) {
   const response = await axios.get(url, {
     timeout: REQUEST_TIMEOUT,
@@ -164,35 +168,58 @@ async function resolveVideo(rawInput, signal) {
   return result;
 }
 
-async function resolveMp3Link(videoUrl, signal) {
+async function resolveMp3Link(videoUrl, signal, preferredTitle = "") {
   const cacheKey = `ytmp3:${videoUrl}:${AUDIO_QUALITY}`;
   const cached = readCache(cacheKey);
   if (cached?.downloadUrl) {
     return cached;
   }
 
-  const payload = await apiGet(
-    API_MP3_URL,
-    {
-      mode: "link",
-      url: videoUrl,
-      quality: AUDIO_QUALITY,
-    },
-    signal
-  );
+  let payload = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      payload = await apiGet(
+        API_MP3_URL,
+        {
+          mode: "link",
+          url: videoUrl,
+          quality: AUDIO_QUALITY,
+        },
+        signal
+      );
+      break;
+    } catch (error) {
+      lastError = error;
+      const detail = String(error?.message || "").toLowerCase();
+      const retryable =
+        detail.includes("no termino la conversion a tiempo") ||
+        detail.includes("internal mp3now error") ||
+        detail.includes("timeout") ||
+        detail.includes("timed out");
+      if (!retryable || attempt === 2) {
+        throw error;
+      }
+      await sleep(1800);
+    }
+  }
+  if (!payload) {
+    throw lastError || new Error("No se pudo resolver el audio.");
+  }
 
   const downloadUrl = normalizeApiUrl(pickDownloadUrl(payload));
   if (!downloadUrl) {
     throw new Error("No se pudo resolver el enlace de audio.");
   }
 
+  const cleanedTitle = safeName(payload?.title || preferredTitle || "audio");
   const fileBase = safeName(
-    String(payload?.filename || payload?.fileName || payload?.title || "audio").replace(/\.[^.]+$/i, ""),
+    String(cleanedTitle || "audio").replace(/\.[^.]+$/i, ""),
     "audio"
   );
   const result = {
     downloadUrl,
-    title: safeName(payload?.title || "audio"),
+    title: cleanedTitle,
     fileName: `${fileBase}.mp3`,
   };
   writeCache(cacheKey, result);
@@ -300,7 +327,7 @@ export default {
       );
 
       throwIfAborted(abortSignal);
-      const mp3 = await resolveMp3Link(video.videoUrl, abortSignal);
+      const mp3 = await resolveMp3Link(video.videoUrl, abortSignal, video.title);
       throwIfAborted(abortSignal);
 
       await sendAudioFast(sock, from, quoted, {
