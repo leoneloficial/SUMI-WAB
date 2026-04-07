@@ -11,9 +11,10 @@ const VIDEO_ENDPOINTS = [
   buildDvyerUrl("/ytaltmp4"),
 ];
 
-const REQUEST_TIMEOUT = 210000;
-const LINK_TIMEOUT = 90000;
-const QUALITY_CANDIDATES = ["240p", "360p", "144p"];
+const LINK_TIMEOUT_FAST = 90000;
+const LINK_TIMEOUT_STABLE = 210000;
+const FAST_QUALITY_CANDIDATES = ["240p", "360p", "144p"];
+const STABLE_QUALITY_CANDIDATES = ["360p", "240p", "144p"];
 const COOLDOWN_TIME = 0;
 const LINK_CACHE_TTL_MS = 8 * 60 * 1000;
 const LINK_RETRY_ATTEMPTS = 2;
@@ -155,8 +156,17 @@ function shouldRetryError(error) {
   );
 }
 
+function hideProviderText(value) {
+  return String(value || "")
+    .replace(/https?:\/\/\S+/gi, "[internal]")
+    .replace(/yt1s/gi, "internal")
+    .replace(/ytdown/gi, "internal")
+    .replace(/mp3now/gi, "internal")
+    .trim();
+}
+
 function toFriendlyError(error) {
-  const text = String(error?.message || error || "").trim();
+  const text = hideProviderText(error?.message || error || "");
   const lower = text.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out")) {
     return "El servidor tardo demasiado. Intenta de nuevo.";
@@ -200,7 +210,7 @@ async function resolveVideoInput(rawInput, signal) {
   };
 }
 
-async function requestVideoLink(endpointUrl, videoUrl, quality, signal) {
+async function requestVideoLink(endpointUrl, videoUrl, quality, signal, { fastMode, timeoutMs }) {
   let lastError = null;
   for (let attempt = 1; attempt <= LINK_RETRY_ATTEMPTS; attempt += 1) {
     try {
@@ -208,11 +218,11 @@ async function requestVideoLink(endpointUrl, videoUrl, quality, signal) {
         endpointUrl,
         {
           mode: "link",
-          fast: "true",
+          fast: fastMode ? "true" : "false",
           url: videoUrl,
           quality,
         },
-        LINK_TIMEOUT,
+        timeoutMs,
         signal
       );
       const streamUrl = normalizeApiUrl(pickVideoStreamUrl(payload));
@@ -240,16 +250,27 @@ async function resolveVideoLink(videoUrl, signal) {
     return cached;
   }
 
+  const strategies = [
+    { fastMode: true, timeoutMs: LINK_TIMEOUT_FAST, qualities: FAST_QUALITY_CANDIDATES },
+    { fastMode: false, timeoutMs: LINK_TIMEOUT_STABLE, qualities: STABLE_QUALITY_CANDIDATES },
+  ];
+
   let lastError = null;
-  for (const endpointUrl of VIDEO_ENDPOINTS) {
-    for (const quality of QUALITY_CANDIDATES) {
-      try {
-        const resolved = await requestVideoLink(endpointUrl, videoUrl, quality, signal);
-        const result = { ...resolved, quality };
-        writeLinkCache(cacheKey, result);
-        return result;
-      } catch (error) {
-        lastError = error;
+  const attempted = new Set();
+  for (const strategy of strategies) {
+    for (const endpointUrl of VIDEO_ENDPOINTS) {
+      for (const quality of strategy.qualities) {
+        const dedupeKey = `${strategy.fastMode}:${endpointUrl}:${quality}`;
+        if (attempted.has(dedupeKey)) continue;
+        attempted.add(dedupeKey);
+        try {
+          const resolved = await requestVideoLink(endpointUrl, videoUrl, quality, signal, strategy);
+          const result = { ...resolved, quality };
+          writeLinkCache(cacheKey, result);
+          return result;
+        } catch (error) {
+          lastError = error;
+        }
       }
     }
   }
@@ -336,7 +357,7 @@ export default {
       await sock.sendMessage(
         from,
         {
-          text: `🎬 Preparando video...\n\n📼 ${video.title}\n⚡ Modo rapido`,
+          text: `🎬 Preparando video...\n\n📼 ${video.title}\n⚡ Modo rapido + fallback estable`,
           ...global.channelInfo,
         },
         quoted
