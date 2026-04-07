@@ -7,7 +7,7 @@ const API_BASE = getDvyerBaseUrl();
 const API_MP3_URL = buildDvyerUrl("/ytmp3");
 const API_SEARCH_URL = buildDvyerUrl("/ytsearch");
 const AUDIO_QUALITY = "128k";
-const REQUEST_TIMEOUT = 30000;
+const REQUEST_TIMEOUT = 180000;
 const COOLDOWN_TIME = 0;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
