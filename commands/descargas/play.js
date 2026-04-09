@@ -1,12 +1,31 @@
 import yts from 'yt-search'
 
+function getPrefix(settings) {
+  if (Array.isArray(settings?.prefix)) {
+    return settings.prefix.find((value) => String(value || '').trim()) || '.'
+  }
+
+  return String(settings?.prefix || '.').trim() || '.'
+}
+
+function clipText(value = '', max = 72) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (text.length <= max) return text
+  return `${text.slice(0, Math.max(1, max - 3))}...`
+}
+
+function buildCommand(prefix, command, url) {
+  return `${prefix}${command} ${url}`.trim()
+}
+
 export default {
   name: 'play',
   command: ['play'],
   category: 'descarga',
 
   async run(ctx) {
-    const { sock: conn, m, from, args } = ctx
+    const { sock: conn, m, from, args, settings } = ctx
+    const prefix = getPrefix(settings)
 
     try {
       const query = Array.isArray(args) ? args.join(' ').trim() : ''
@@ -14,7 +33,7 @@ export default {
       if (!query) {
         return await conn.sendMessage(
           from,
-          { text: 'Ejemplo:\n.yts anuel aa' },
+          { text: `Ejemplo:\n${prefix}play ozuna odisea` },
           { quoted: m }
         )
       }
@@ -41,11 +60,18 @@ export default {
         console.error('Error descargando thumbnail:', e)
       }
 
+      const mp3Rows = videos.map((v, i) => ({
+        header: `${i + 1}`,
+        title: clipText(v.title || 'Sin titulo', 72),
+        description: clipText(`MP3 | ${v.timestamp || '??:??'} | ${v.author?.name || 'Desconocido'}`, 72),
+        id: buildCommand(prefix, 'ytmp3', v.url)
+      }))
+
       const mp4Rows = videos.map((v, i) => ({
         header: `${i + 1}`,
-        title: String(v.title || 'Sin título').slice(0, 72),
-        description: `🎬 MP4 | ⏱ ${v.timestamp || '??:??'} | 👤 ${v.author?.name || 'Desconocido'}`.slice(0, 72),
-        id: `.ytmp4 ${v.url}`
+        title: clipText(v.title || 'Sin titulo', 72),
+        description: clipText(`MP4 | ${v.timestamp || '??:??'} | ${v.author?.name || 'Desconocido'}`, 72),
+        id: buildCommand(prefix, 'ytmp4', v.url)
       }))
 
       if (thumbBuffer) {
@@ -57,7 +83,7 @@ export default {
               `🎵 *FSOCIETY BOT*\n\n` +
               `🔎 Resultado para: *${query}*\n` +
               `📌 Primer resultado: *${videos[0].title}*\n\n` +
-              `Selecciona un resultado para MP4. El scraper esta reiniciado para rehacerlo limpio.`
+              `Elige MP3 para descargar audio directo.`
           },
           { quoted: m }
         )
@@ -68,7 +94,7 @@ export default {
             text:
               `🎵 *FSOCIETY BOT*\n\n` +
               `🔎 Resultado para: *${query}*\n\n` +
-              `Selecciona un resultado para MP4. El scraper esta reiniciado para rehacerlo limpio.`
+              `Elige MP3 para descargar audio directo.`
           },
           { quoted: m }
         )
@@ -79,16 +105,20 @@ export default {
         {
           text: `Resultados para: ${query}`,
           title: 'FSOCIETY BOT',
-          subtitle: 'MP4',
+          subtitle: 'YouTube MP3 / MP4',
           footer: 'Descargas YouTube',
           interactiveButtons: [
             {
               name: 'single_select',
               buttonParamsJson: JSON.stringify({
-                title: '🎬 Descargar MP4',
+                title: 'Elegir descarga',
                 sections: [
                   {
-                    title: 'Resultados MP4',
+                    title: 'MP3 - Audio rapido',
+                    rows: mp3Rows
+                  },
+                  {
+                    title: 'MP4 - Video',
                     rows: mp4Rows
                   }
                 ]
