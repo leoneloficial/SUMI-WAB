@@ -186,6 +186,24 @@ function resolveInput(ctx) {
   return argsText || quotedText || "";
 }
 
+function parseDeliveryModeAndInput(rawInput) {
+  let query = String(rawInput || "").trim();
+  let deliveryMode = "file";
+  const flagMatch = query.match(/--?(stream|streaming|file|direct|download|descarga)\b/i);
+  if (flagMatch) {
+    const value = flagMatch[1].toLowerCase();
+    deliveryMode = value.startsWith("stream") ? "stream" : "file";
+    query = query.replace(flagMatch[0], " ").replace(/\s+/g, " ").trim();
+  }
+  const [firstToken, ...rest] = query.split(/\s+/);
+  const modeToken = String(firstToken || "").toLowerCase();
+  if (["stream", "streaming", "file", "direct", "download", "descarga"].includes(modeToken)) {
+    deliveryMode = modeToken.startsWith("stream") ? "stream" : "file";
+    query = rest.join(" ").trim();
+  }
+  return { query, deliveryMode };
+}
+
 function normalizeApiUrl(url) {
   const value = String(url || "").trim();
   if (!value) return "";
@@ -676,16 +694,54 @@ function getCooldownRemaining(untilMs) {
   return Math.max(0, Math.ceil((untilMs - now()) / 1000));
 }
 
-async function sendAudioFast(sock, from, quoted, { downloadUrl, localFileUrl, fileName, title, thumbnail, videoUrl, mimetype, quality, format, signal }) {
+async function sendAudioFast(sock, from, quoted, { downloadUrl, localFileUrl, fileName, title, thumbnail, videoUrl, mimetype, quality, format, signal, deliveryMode = "file" }) {
   let lastError = null;
   const cleanTitle = displayTitle(title, "audio");
   const cleanQuality = quality || AUDIO_QUALITY;
+  const streamMime = mimetype || "audio/mpeg";
+  const streamFormat = format || "MP3";
   const metadata = buildMediaContext({
     title: cleanTitle,
     body: `MP3 • ${cleanQuality} • DVYER`,
     thumbnail,
     sourceUrl: videoUrl,
   });
+
+  if (deliveryMode === "stream") {
+    try {
+      await sock.sendMessage(
+        from,
+        withChannelInfo({
+          audio: { url: downloadUrl },
+          mimetype: streamMime,
+          ptt: false,
+          fileName,
+          title: cleanTitle,
+        }, metadata),
+        quoted
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+
+    try {
+      await sock.sendMessage(
+        from,
+        withChannelInfo({
+          document: { url: downloadUrl },
+          mimetype: streamMime,
+          fileName,
+          title: cleanTitle,
+          caption: buildReadyCaption({ title: cleanTitle, quality: cleanQuality, format: streamFormat }),
+        }, metadata),
+        quoted
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
 
   const prepared = await prepareLocalAudio({
     downloadUrl,
@@ -740,7 +796,7 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, localFileUrl, fi
   }
 }
 
-async function sendAudioWithFreshLink(sock, from, quoted, { videoUrl, initialMp3, fallbackTitle, thumbnail, signal }) {
+async function sendAudioWithFreshLink(sock, from, quoted, { videoUrl, initialMp3, fallbackTitle, thumbnail, signal, deliveryMode = "file" }) {
   let mp3 = initialMp3;
   let lastError = null;
 
@@ -757,6 +813,7 @@ async function sendAudioWithFreshLink(sock, from, quoted, { videoUrl, initialMp3
         quality: mp3.quality,
         format: mp3.format,
         signal,
+        deliveryMode,
       });
       return;
     } catch (error) {
@@ -800,13 +857,22 @@ export default {
       if (!input) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .ytmp3 <nombre o link de YouTube>",
+          text: "❌ Uso: .ytmp3 <nombre o link>\nOpcional: .ytmp3 --stream <nombre> o .ytmp3 --file <nombre>",
+          ...global.channelInfo,
+        });
+      }
+
+      const parsed = parseDeliveryModeAndInput(input);
+      if (!parsed.query) {
+        cooldowns.delete(userId);
+        return sock.sendMessage(from, {
+          text: "❌ Escribe titulo o link de YouTube despues del modo.",
           ...global.channelInfo,
         });
       }
 
       throwIfAborted(abortSignal);
-      const candidates = await resolveAudioCandidates(input, abortSignal);
+      const candidates = await resolveAudioCandidates(parsed.query, abortSignal);
       const video = candidates[0];
 
       charged = await chargeDownloadRequest(ctx, {
@@ -825,7 +891,7 @@ export default {
           text: buildStatusText({
             title: video.title,
             quality: AUDIO_QUALITY,
-            state: "buscando enlace seguro",
+            state: parsed.deliveryMode === "stream" ? "preparando streaming" : "descargando archivo",
           }),
         }, buildMediaContext({
           title: video.title,
@@ -848,6 +914,7 @@ export default {
         fallbackTitle: selectedVideo.title,
         thumbnail: selectedVideo.thumbnail,
         signal: abortSignal,
+        deliveryMode: parsed.deliveryMode,
       });
     } catch (error) {
       if (abortSignal?.aborted) {

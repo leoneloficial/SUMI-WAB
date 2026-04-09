@@ -1,4 +1,9 @@
+import fs from "fs";
+import path from "path";
+import os from "os";
 import axios from "axios";
+import { pipeline } from "stream/promises";
+import { randomUUID } from "crypto";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
 import { throwIfAborted } from "../../lib/command-abort.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
@@ -8,11 +13,13 @@ const API_SEARCH_URL = buildDvyerUrl("/ytsearch");
 const VIDEO_ENDPOINTS = [
   buildDvyerUrl("/ytdlmp4"),
 ];
+const TMP_DIR = path.join(os.tmpdir(), "dvyer-ytmp4");
 
 const LINK_TIMEOUT_FAST = 90000;
 const LINK_TIMEOUT_STABLE = 210000;
-const LOCAL_VIDEO_TIMEOUT = 300000;
-const MAX_VIDEO_BYTES = 95 * 1024 * 1024;
+const LOCAL_VIDEO_TIMEOUT = 420000;
+const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
+const VIDEO_AS_DOCUMENT_THRESHOLD = 70 * 1024 * 1024;
 const VIDEO_QUALITIES = ["1080p", "720p", "480p", "360p", "240p", "144p"];
 const DEFAULT_VIDEO_QUALITY = "360p";
 const COOLDOWN_TIME = 0;
@@ -53,6 +60,33 @@ function safeFileName(value, fallback = "video") {
     .trim()
     .slice(0, 90);
   return clean || fallback;
+}
+
+function ensureTmpDir() {
+  try {
+    fs.mkdirSync(TMP_DIR, { recursive: true });
+  } catch {}
+}
+
+function deleteFileSafe(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
+}
+
+function parseFileNameFromDisposition(value = "") {
+  const header = String(value || "");
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.replace(/["']/g, ""));
+    } catch {
+      return encoded.replace(/["']/g, "");
+    }
+  }
+  return header.match(/filename="?([^";]+)"?/i)?.[1] || "";
 }
 
 function buildStatusText({ title, quality, state }) {
@@ -121,6 +155,15 @@ function normalizeApiUrl(value) {
   if (isHttpUrl(text)) return text;
   if (text.startsWith("/")) return `${API_BASE}${text}`;
   return `${API_BASE}/${text}`;
+}
+
+function buildApiVideoFileUrl(endpointUrl, videoUrl, quality, fastMode = false) {
+  const target = new URL(endpointUrl);
+  target.searchParams.set("mode", "file");
+  target.searchParams.set("fast", fastMode ? "true" : "false");
+  target.searchParams.set("url", videoUrl);
+  target.searchParams.set("quality", quality || DEFAULT_VIDEO_QUALITY);
+  return target.toString();
 }
 
 function pickVideoStreamUrl(payload) {
@@ -219,6 +262,21 @@ function parseQualityAndInput(rawInput) {
 
   let query = text;
   let quality = "";
+  let deliveryMode = "file";
+
+  const modeFlagMatch = query.match(/--?(stream|streaming|file|direct|download|descarga)\b/i);
+  if (modeFlagMatch) {
+    const value = modeFlagMatch[1].toLowerCase();
+    deliveryMode = value.startsWith("stream") ? "stream" : "file";
+    query = safeText(query.replace(modeFlagMatch[0], " "));
+  }
+
+  const [maybeMode, ...modeRest] = query.split(/\s+/);
+  const modeToken = String(maybeMode || "").toLowerCase();
+  if (["stream", "streaming", "file", "direct", "download", "descarga"].includes(modeToken)) {
+    deliveryMode = modeToken.startsWith("stream") ? "stream" : "file";
+    query = safeText(modeRest.join(" "));
+  }
 
   const flagMatch = query.match(/--?(?:q|quality)\s*=?\s*([a-z0-9]+)/i);
   if (flagMatch) {
@@ -248,6 +306,7 @@ function parseQualityAndInput(rawInput) {
   return {
     query,
     quality: quality || DEFAULT_VIDEO_QUALITY,
+    deliveryMode,
   };
 }
 
@@ -351,13 +410,26 @@ async function apiGet(url, params, timeoutMs, signal) {
   return response.data;
 }
 
-async function fetchVideoBuffer(streamUrl, signal) {
-  const response = await axios.get(streamUrl, {
+async function readStreamText(stream, limit = 1200) {
+  return new Promise((resolve) => {
+    let text = "";
+    stream?.on?.("data", (chunk) => {
+      if (text.length < limit) {
+        text += Buffer.from(chunk).toString("utf-8");
+      }
+    });
+    stream?.on?.("end", () => resolve(text.slice(0, limit)));
+    stream?.on?.("error", () => resolve(text.slice(0, limit)));
+  });
+}
+
+async function downloadVideoFile(fileUrl, { fileName, title, signal }) {
+  ensureTmpDir();
+  const response = await axios.get(fileUrl, {
     timeout: LOCAL_VIDEO_TIMEOUT,
-    responseType: "arraybuffer",
+    responseType: "stream",
     signal: signal || undefined,
-    maxContentLength: MAX_VIDEO_BYTES,
-    maxBodyLength: MAX_VIDEO_BYTES,
+    maxRedirects: 5,
     validateStatus: () => true,
     headers: {
       "User-Agent": "Mozilla/5.0",
@@ -366,17 +438,53 @@ async function fetchVideoBuffer(streamUrl, signal) {
   });
 
   if (response.status >= 400) {
-    throw new Error(`HTTP ${response.status}`);
+    const detail = hideProviderText(await readStreamText(response.data));
+    throw new Error(detail || `HTTP ${response.status}`);
   }
 
-  const buffer = Buffer.from(response.data || []);
-  if (!buffer.length) {
-    throw new Error("El video llego vacio.");
-  }
-  if (buffer.length > MAX_VIDEO_BYTES) {
+  const contentLength = Number(response.headers?.["content-length"] || 0);
+  if (contentLength && contentLength > MAX_VIDEO_BYTES) {
     throw new Error("El video es demasiado grande para enviarlo directo.");
   }
-  return buffer;
+
+  const headerName = parseFileNameFromDisposition(response.headers?.["content-disposition"]);
+  const normalizedName = normalizeMp4Name(headerName || fileName || title || "video");
+  const outputPath = path.join(TMP_DIR, `${Date.now()}-${randomUUID()}-${normalizedName}`);
+  const outputStream = fs.createWriteStream(outputPath);
+  let downloaded = 0;
+
+  response.data.on("data", (chunk) => {
+    downloaded += chunk.length;
+    if (downloaded > MAX_VIDEO_BYTES) {
+      response.data.destroy(new Error("El video es demasiado grande para enviarlo directo."));
+    }
+  });
+
+  try {
+    await pipeline(response.data, outputStream);
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    throw error;
+  }
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error("No se pudo guardar el video temporal.");
+  }
+  const size = fs.statSync(outputPath).size;
+  if (!size || size < 1024) {
+    deleteFileSafe(outputPath);
+    throw new Error("El video llego vacio o incompleto.");
+  }
+  if (size > MAX_VIDEO_BYTES) {
+    deleteFileSafe(outputPath);
+    throw new Error("El video es demasiado grande para enviarlo directo.");
+  }
+
+  return {
+    filePath: outputPath,
+    size,
+    fileName: normalizedName,
+  };
 }
 
 async function resolveVideoInput(rawInput, signal) {
@@ -423,6 +531,7 @@ async function requestVideoLink(endpointUrl, videoUrl, quality, signal, { fastMo
       const resolvedQuality = safeText(payload?.quality || payload?.provider_quality || quality, quality);
       return {
         streamUrl,
+        localFileUrl: buildApiVideoFileUrl(endpointUrl, videoUrl, resolvedQuality || quality, false),
         title,
         fileName,
         quality: resolvedQuality,
@@ -480,7 +589,7 @@ async function resolveVideoLink(videoUrl, requestedQuality, signal) {
   throw lastError || new Error("No se pudo obtener un enlace de video.");
 }
 
-async function sendVideo(sock, from, quoted, { streamUrl, title, fileName, quality, thumbnail, videoUrl, signal }) {
+async function sendVideo(sock, from, quoted, { streamUrl, localFileUrl, title, fileName, quality, thumbnail, videoUrl, signal, deliveryMode = "file" }) {
   let lastError = null;
   const cleanTitle = displayTitle(title);
   const cleanQuality = safeText(quality, DEFAULT_VIDEO_QUALITY);
@@ -491,74 +600,90 @@ async function sendVideo(sock, from, quoted, { streamUrl, title, fileName, quali
     thumbnail,
     sourceUrl: videoUrl,
   });
-  try {
-    await sock.sendMessage(
-      from,
-      withChannelInfo({
-        video: { url: streamUrl },
-        mimetype: "video/mp4",
-        fileName,
-        title: cleanTitle,
-        caption,
-      }, metadata),
-      quoted
-    );
-    return;
-  } catch (error) {
-    lastError = error;
+
+  if (deliveryMode === "stream") {
+    try {
+      await sock.sendMessage(
+        from,
+        withChannelInfo({
+          video: { url: streamUrl },
+          mimetype: "video/mp4",
+          fileName,
+          title: cleanTitle,
+          caption,
+        }, metadata),
+        quoted
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+
+    try {
+      await sock.sendMessage(
+        from,
+        withChannelInfo({
+          document: { url: streamUrl },
+          mimetype: "video/mp4",
+          fileName,
+          title: cleanTitle,
+          caption,
+        }, metadata),
+        quoted
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  try {
-    await sock.sendMessage(
-      from,
-      withChannelInfo({
-        document: { url: streamUrl },
-        mimetype: "video/mp4",
-        fileName,
-        title: cleanTitle,
-        caption,
-      }, metadata),
-      quoted
-    );
-    return;
-  } catch (error) {
-    lastError = error;
-  }
-
-  const buffer = await fetchVideoBuffer(streamUrl, signal);
-  try {
-    await sock.sendMessage(
-      from,
-      withChannelInfo({
-        video: buffer,
-        mimetype: "video/mp4",
-        fileName,
-        title: cleanTitle,
-        caption,
-      }, metadata),
-      quoted
-    );
-    return;
-  } catch (error) {
-    lastError = error;
-  }
-
-  await sock.sendMessage(
-    from,
-    withChannelInfo({
-      document: buffer,
-      mimetype: "video/mp4",
-      fileName,
-      title: cleanTitle,
-      caption,
-    }, metadata),
-    quoted
-  ).catch(() => {
-    throw lastError || new Error("No se pudo enviar el video.");
+  const prepared = await downloadVideoFile(localFileUrl || streamUrl, {
+    fileName,
+    title: cleanTitle,
+    signal,
   });
+  const cleanFileName = prepared.fileName || fileName || normalizeMp4Name(cleanTitle);
+  const sendAsDocument = prepared.size > VIDEO_AS_DOCUMENT_THRESHOLD;
+
+  try {
+    if (!sendAsDocument) {
+      try {
+        await sock.sendMessage(
+          from,
+          withChannelInfo({
+            video: { url: prepared.filePath },
+            mimetype: "video/mp4",
+            fileName: cleanFileName,
+            title: cleanTitle,
+            caption,
+          }, metadata),
+          quoted
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    await sock.sendMessage(
+      from,
+      withChannelInfo({
+        document: { url: prepared.filePath },
+        mimetype: "video/mp4",
+        fileName: cleanFileName,
+        title: cleanTitle,
+        caption,
+      }, metadata),
+      quoted
+    ).catch(() => {
+      throw lastError || new Error("No se pudo enviar el video.");
+    });
+  } finally {
+    deleteFileSafe(prepared.filePath);
+  }
 }
 
-async function sendVideoWithFreshLink(sock, from, quoted, { videoUrl, requestedQuality, initialResolved, fallbackTitle, thumbnail, signal }) {
+async function sendVideoWithFreshLink(sock, from, quoted, { videoUrl, requestedQuality, initialResolved, fallbackTitle, thumbnail, signal, deliveryMode = "file" }) {
   let resolved = initialResolved;
   let lastError = null;
 
@@ -566,12 +691,14 @@ async function sendVideoWithFreshLink(sock, from, quoted, { videoUrl, requestedQ
     try {
       await sendVideo(sock, from, quoted, {
         streamUrl: resolved.streamUrl,
+        localFileUrl: resolved.localFileUrl,
         title: displayTitle(resolved.title || fallbackTitle, "video youtube"),
         fileName: normalizeMp4Name(resolved.title || fallbackTitle),
         quality: resolved.quality || requestedQuality || DEFAULT_VIDEO_QUALITY,
         thumbnail: resolved.thumbnail || thumbnail,
         videoUrl,
         signal,
+        deliveryMode,
       });
       return;
     } catch (error) {
@@ -615,7 +742,7 @@ export default {
       if (!input) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .ytmp4 <nombre o link>\nOpcional: .ytmp4 720p <nombre o link>\nPor defecto uso 360p.",
+          text: "❌ Uso: .ytmp4 <nombre o link>\nOpcional: .ytmp4 --stream 360p <nombre> o .ytmp4 --file 720p <link>.",
           ...global.channelInfo,
         });
       }
@@ -648,7 +775,7 @@ export default {
           text: buildStatusText({
             title: video.title,
             quality: parsed.quality,
-            state: "buscando mejor motor",
+            state: parsed.deliveryMode === "stream" ? "preparando streaming" : "descargando archivo",
           }),
         }, buildMediaContext({
           title: video.title,
@@ -670,6 +797,7 @@ export default {
         fallbackTitle: video.title,
         thumbnail: video.thumbnail,
         signal: abortSignal,
+        deliveryMode: parsed.deliveryMode,
       });
     } catch (error) {
       if (abortSignal?.aborted) {
