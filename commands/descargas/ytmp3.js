@@ -8,6 +8,8 @@ const API_MP3_URL = buildDvyerUrl("/ytmp3");
 const API_SEARCH_URL = buildDvyerUrl("/ytsearch");
 const AUDIO_QUALITY = "128k";
 const REQUEST_TIMEOUT = 420000;
+const LOCAL_AUDIO_TIMEOUT = 240000;
+const MAX_AUDIO_BYTES = 80 * 1024 * 1024;
 const LINK_RETRY_ATTEMPTS = 4;
 const COOLDOWN_TIME = 0;
 const CACHE_TTL_MS = 10 * 60 * 1000;
@@ -123,6 +125,7 @@ function hideProviderText(value) {
     .replace(/https?:\/\/\S+/gi, "[internal]")
     .replace(/yt1s/gi, "internal")
     .replace(/ytdown/gi, "internal")
+    .replace(/ytdlp/gi, "internal")
     .replace(/ytmp3tube/gi, "internal")
     .replace(/mp3now/gi, "internal")
     .trim();
@@ -165,6 +168,34 @@ async function apiGet(url, params, signal) {
   }
 
   return response.data;
+}
+
+async function fetchAudioBuffer(downloadUrl, signal) {
+  const response = await axios.get(downloadUrl, {
+    timeout: LOCAL_AUDIO_TIMEOUT,
+    responseType: "arraybuffer",
+    signal: signal || undefined,
+    maxContentLength: MAX_AUDIO_BYTES,
+    maxBodyLength: MAX_AUDIO_BYTES,
+    validateStatus: () => true,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Accept: "audio/mpeg,audio/*,*/*",
+    },
+  });
+
+  if (response.status >= 400) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const buffer = Buffer.from(response.data || []);
+  if (!buffer.length) {
+    throw new Error("El audio llego vacio.");
+  }
+  if (buffer.length > MAX_AUDIO_BYTES) {
+    throw new Error("El audio es demasiado grande para enviarlo directo.");
+  }
+  return buffer;
 }
 
 async function resolveVideo(rawInput, signal) {
@@ -254,6 +285,9 @@ async function resolveMp3Link(videoUrl, signal, preferredTitle = "") {
 function toFriendlyError(error) {
   const text = hideProviderText(error?.message || error || "");
   const low = text.toLowerCase();
+  if (low.includes("demasiado grande")) {
+    return "El archivo es muy grande para enviarlo directo.";
+  }
   if (low.includes("rate-overlimit") || low.includes("rate overlimit") || low.includes("overlimit")) {
     return "El proveedor esta saturado ahora. Reintenta en 15-30 segundos.";
   }
@@ -273,7 +307,8 @@ function getCooldownRemaining(untilMs) {
   return Math.max(0, Math.ceil((untilMs - now()) / 1000));
 }
 
-async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title }) {
+async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title, signal }) {
+  let lastError = null;
   try {
     await sock.sendMessage(
       from,
@@ -287,19 +322,58 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title 
       quoted
     );
     return;
-  } catch {}
+  } catch (error) {
+    lastError = error;
+  }
+
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        document: { url: downloadUrl },
+        mimetype: "audio/mpeg",
+        fileName,
+        caption: `🎵 ${title}`,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return;
+  } catch (error) {
+    lastError = error;
+  }
+
+  const buffer = await fetchAudioBuffer(downloadUrl, signal);
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        audio: buffer,
+        mimetype: "audio/mpeg",
+        ptt: false,
+        fileName,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return;
+  } catch (error) {
+    lastError = error;
+  }
 
   await sock.sendMessage(
     from,
     {
-      document: { url: downloadUrl },
+      document: buffer,
       mimetype: "audio/mpeg",
       fileName,
       caption: `🎵 ${title}`,
       ...global.channelInfo,
     },
     quoted
-  );
+  ).catch(() => {
+    throw lastError || new Error("No se pudo enviar el audio.");
+  });
 }
 
 export default {
@@ -351,7 +425,7 @@ export default {
       await sock.sendMessage(
         from,
         {
-          text: `🎵 Preparando audio...\n\n🎧 ${video.title}\n🎚️ Calidad: ${AUDIO_QUALITY}`,
+          text: `🎵 DVYER MP3\n🎧 ${video.title}\n🎚️ ${AUDIO_QUALITY}\n⏳ Preparando descarga...`,
           ...global.channelInfo,
         },
         quoted
@@ -365,6 +439,7 @@ export default {
         downloadUrl: mp3.downloadUrl,
         fileName: mp3.fileName,
         title: mp3.title || video.title,
+        signal: abortSignal,
       });
     } catch (error) {
       if (abortSignal?.aborted) {

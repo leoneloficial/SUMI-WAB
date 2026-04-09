@@ -14,6 +14,8 @@ const VIDEO_ENDPOINTS = [
 
 const LINK_TIMEOUT_FAST = 90000;
 const LINK_TIMEOUT_STABLE = 210000;
+const LOCAL_VIDEO_TIMEOUT = 300000;
+const MAX_VIDEO_BYTES = 95 * 1024 * 1024;
 const VIDEO_QUALITIES = ["1080p", "720p", "480p", "360p", "240p", "144p"];
 const DEFAULT_VIDEO_QUALITY = "360p";
 const COOLDOWN_TIME = 0;
@@ -247,6 +249,7 @@ function hideProviderText(value) {
     .replace(/https?:\/\/\S+/gi, "[internal]")
     .replace(/yt1s/gi, "internal")
     .replace(/ytdown/gi, "internal")
+    .replace(/ytdlp/gi, "internal")
     .replace(/ytmp3tube/gi, "internal")
     .replace(/mp3now/gi, "internal")
     .trim();
@@ -255,6 +258,9 @@ function hideProviderText(value) {
 function toFriendlyError(error) {
   const text = hideProviderText(error?.message || error || "");
   const lower = text.toLowerCase();
+  if (lower.includes("demasiado grande")) {
+    return "El video es muy grande para enviarlo directo. Prueba 360p o 240p.";
+  }
   if (lower.includes("timeout") || lower.includes("timed out")) {
     return "El servidor tardo demasiado. Intenta de nuevo.";
   }
@@ -281,6 +287,34 @@ async function apiGet(url, params, timeoutMs, signal) {
     throw new Error(extractApiError(response.data, response.status));
   }
   return response.data;
+}
+
+async function fetchVideoBuffer(streamUrl, signal) {
+  const response = await axios.get(streamUrl, {
+    timeout: LOCAL_VIDEO_TIMEOUT,
+    responseType: "arraybuffer",
+    signal: signal || undefined,
+    maxContentLength: MAX_VIDEO_BYTES,
+    maxBodyLength: MAX_VIDEO_BYTES,
+    validateStatus: () => true,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Accept: "video/mp4,video/*,*/*",
+    },
+  });
+
+  if (response.status >= 400) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const buffer = Buffer.from(response.data || []);
+  if (!buffer.length) {
+    throw new Error("El video llego vacio.");
+  }
+  if (buffer.length > MAX_VIDEO_BYTES) {
+    throw new Error("El video es demasiado grande para enviarlo directo.");
+  }
+  return buffer;
 }
 
 async function resolveVideoInput(rawInput, signal) {
@@ -384,7 +418,8 @@ async function resolveVideoLink(videoUrl, requestedQuality, signal) {
   throw lastError || new Error("No se pudo obtener un enlace de video.");
 }
 
-async function sendVideo(sock, from, quoted, { streamUrl, title, fileName, quality }) {
+async function sendVideo(sock, from, quoted, { streamUrl, title, fileName, quality, signal }) {
+  let lastError = null;
   try {
     await sock.sendMessage(
       from,
@@ -398,19 +433,58 @@ async function sendVideo(sock, from, quoted, { streamUrl, title, fileName, quali
       quoted
     );
     return;
-  } catch {}
+  } catch (error) {
+    lastError = error;
+  }
+
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        document: { url: streamUrl },
+        mimetype: "video/mp4",
+        fileName,
+        caption: `🎬 ${title}\n🎚️ ${quality}`,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return;
+  } catch (error) {
+    lastError = error;
+  }
+
+  const buffer = await fetchVideoBuffer(streamUrl, signal);
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        video: buffer,
+        mimetype: "video/mp4",
+        fileName,
+        caption: `🎬 ${title}\n🎚️ ${quality}`,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return;
+  } catch (error) {
+    lastError = error;
+  }
 
   await sock.sendMessage(
     from,
     {
-      document: { url: streamUrl },
+      document: buffer,
       mimetype: "video/mp4",
       fileName,
       caption: `🎬 ${title}\n🎚️ ${quality}`,
       ...global.channelInfo,
     },
     quoted
-  );
+  ).catch(() => {
+    throw lastError || new Error("No se pudo enviar el video.");
+  });
 }
 
 export default {
@@ -471,7 +545,7 @@ export default {
       await sock.sendMessage(
         from,
         {
-          text: `🎬 Preparando video...\n\n📼 ${video.title}\n🎚️ Pedido: ${parsed.quality}\n⚡ Fallback automatico`,
+          text: `🎬 DVYER MP4\n📼 ${video.title}\n🎚️ Pedido: ${parsed.quality}\n⏳ Preparando descarga...`,
           ...global.channelInfo,
         },
         quoted
@@ -486,6 +560,7 @@ export default {
         title: safeText(resolved.title || video.title, "video youtube"),
         fileName: normalizeMp4Name(resolved.fileName || video.title),
         quality: resolved.quality || "auto",
+        signal: abortSignal,
       });
     } catch (error) {
       if (abortSignal?.aborted) {
