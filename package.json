@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@dvyer/baileys": "github:DevYerZx/Baileys-dvvyerMD#main",
-    "axios": "^1.6.0",
+    "axios": "^1.15.0",
     "chalk": "^4.1.2",
     "dotenv": "^16.4.7",
     "figlet": "^1.9.3",
