@@ -87,13 +87,27 @@ function parseContentDispositionFileName(headerValue) {
   return normalMatch?.[1]?.trim() || "";
 }
 
+function chunkToText(chunk) {
+  if (chunk == null) return "";
+  if (Buffer.isBuffer(chunk)) return chunk.toString("utf8");
+  return String(chunk);
+}
+
 async function readStreamToText(stream) {
-  if (!stream || typeof stream.on !== "function") return "";
+  if (!stream) return "";
+  if (typeof stream[Symbol.asyncIterator] === "function") {
+    let data = "";
+    for await (const chunk of stream) {
+      data += chunkToText(chunk);
+      if (data.length > 20000) data = data.slice(-20000);
+    }
+    return data;
+  }
+  if (typeof stream.on !== "function") return "";
   return await new Promise((resolve, reject) => {
     let data = "";
     stream.on("data", (chunk) => {
-      if (chunk == null) return;
-      data += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      data += chunkToText(chunk);
       if (data.length > 20000) data = data.slice(-20000);
     });
     stream.on("end", () => resolve(data));
@@ -126,8 +140,7 @@ function runFfmpeg(args, timeoutMs) {
     }, timeoutMs);
 
     child.stderr?.on("data", (chunk) => {
-      if (chunk == null) return;
-      stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      stderr += chunkToText(chunk);
       if (stderr.length > 4000) stderr = stderr.slice(-4000);
     });
 
@@ -263,6 +276,24 @@ async function remuxMp4Fast(data) {
     await deleteFileSafe(outputPath);
     return data;
   }
+}
+
+async function findLatestTmpMp4(maxAgeMs = 30 * 60 * 1000) {
+  await ensureTmpDir();
+  const now = Date.now();
+  const entries = await fsp.readdir(TMP_DIR, { withFileTypes: true }).catch(() => []);
+  let selected = null;
+  for (const entry of entries) {
+    if (!entry?.isFile?.() || !entry.name.toLowerCase().endsWith(".mp4")) continue;
+    const fullPath = path.join(TMP_DIR, entry.name);
+    const stat = await fsp.stat(fullPath).catch(() => null);
+    if (!stat?.size || stat.size < MIN_VIDEO_BYTES) continue;
+    if (now - stat.mtimeMs > maxAgeMs) continue;
+    if (!selected || stat.mtimeMs > selected.mtimeMs) {
+      selected = { path: fullPath, size: stat.size, mtimeMs: stat.mtimeMs };
+    }
+  }
+  return selected;
 }
 
 function extractTextFromMessage(message) {
@@ -649,6 +680,7 @@ export default {
 
     let tempPath = null;
     let downloadCharge = null;
+    let sentSuccessfully = false;
 
     try {
       const rawInput = resolveRawInput(ctx);
@@ -696,6 +728,7 @@ export default {
       );
 
       const downloaded = await downloadYtmp4Fallback(resolved.url, resolved.title, quality, fast);
+      tempPath = downloaded.tempPath;
       const transcoded = await transcodeMp4Full(downloaded);
       const prepared = await remuxMp4Fast(transcoded);
       tempPath = prepared.tempPath;
@@ -707,22 +740,46 @@ export default {
         title: resolved.title || path.parse(officialFileName).name,
         quality,
       });
+      sentSuccessfully = true;
     } catch (error) {
       console.error("YTMP4 ERROR:", error?.message || error);
 
-      refundDownloadCharge(ctx, downloadCharge, {
-        feature: "ytmp4",
-        error: String(error?.message || error || "unknown_error"),
-      });
+      const errText = String(error?.message || error || "");
+      if (!sentSuccessfully && /toString/i.test(errText)) {
+        const fallback = await findLatestTmpMp4();
+        if (fallback?.path) {
+          tempPath = fallback.path;
+          try {
+            const fallbackName = normalizeMp4Name("youtube-video");
+            await sendLocalMp4(sock, from, quoted, {
+              tempPath: fallback.path,
+              fileName: fallbackName,
+              size: fallback.size,
+              title: "YouTube Video",
+              quality: "360p",
+            });
+            sentSuccessfully = true;
+          } catch {}
+        }
+      }
 
-      await sock.sendMessage(
-        from,
-        {
-          text: `❌ ${String(error?.message || "No se pudo preparar el MP4.")}`,
-          ...global.channelInfo,
-        },
-        quoted
-      );
+      if (!sentSuccessfully) {
+        refundDownloadCharge(ctx, downloadCharge, {
+          feature: "ytmp4",
+          error: String(error?.message || error || "unknown_error"),
+        });
+      }
+
+      if (!sentSuccessfully) {
+        await sock.sendMessage(
+          from,
+          {
+            text: `❌ ${String(error?.message || "No se pudo preparar el MP4.")}`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
     } finally {
       await deleteFileSafe(tempPath);
     }
