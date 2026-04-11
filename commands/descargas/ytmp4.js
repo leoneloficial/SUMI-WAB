@@ -243,63 +243,120 @@ async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = tr
 
   const outputPath = path.join(TMP_DIR, `${Date.now()}-${randomUUID()}-ytmp4.mp4`);
 
-  const response = await axios.get(API_YTMP4_URL, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    params: {
-      mode: "file",
-      url: videoUrl,
-      quality,
-      fast,
-    },
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
-      Accept: "*/*",
-    },
-    httpAgent: HTTP_AGENT,
-    httpsAgent: HTTPS_AGENT,
-    maxRedirects: 5,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    validateStatus: () => true,
-  });
-
-  if (response.status >= 400) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  const contentLength = Number(response.headers?.["content-length"] || 0);
-  if (contentLength > MAX_VIDEO_BYTES) {
-    throw new Error(`El video pesa ${humanBytes(contentLength)} y supera el límite del bot.`);
-  }
-
-  let downloaded = 0;
-  response.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (downloaded > MAX_VIDEO_BYTES) {
-      response.data.destroy(new Error("El video es demasiado grande para enviarlo por WhatsApp."));
+  const downloadFromResponse = async (response, fallbackName) => {
+    const contentLength = Number(response.headers?.["content-length"] || 0);
+    if (contentLength > MAX_VIDEO_BYTES) {
+      throw new Error(`El video pesa ${humanBytes(contentLength)} y supera el limite del bot.`);
     }
-  });
+
+    let downloaded = 0;
+    response.data.on("data", (chunk) => {
+      downloaded += chunk.length;
+      if (downloaded > MAX_VIDEO_BYTES) {
+        response.data.destroy(new Error("El video es demasiado grande para enviarlo por WhatsApp."));
+      }
+    });
+
+    try {
+      await pipeline(response.data, fs.createWriteStream(outputPath));
+    } catch (error) {
+      deleteFileSafe(outputPath);
+      throw error;
+    }
+
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("No se pudo guardar el MP4.");
+    }
+
+    const size = fs.statSync(outputPath).size;
+    if (size < MIN_VIDEO_BYTES) {
+      deleteFileSafe(outputPath);
+      throw new Error("El archivo MP4 descargado es invalido.");
+    }
+    if (size > MAX_VIDEO_BYTES) {
+      deleteFileSafe(outputPath);
+      throw new Error(`El video pesa ${humanBytes(size)} y supera el limite del bot.`);
+    }
+
+    const headerName = parseContentDispositionFileName(response.headers?.["content-disposition"]);
+    const fileName = normalizeMp4Name(headerName || fallbackName || "youtube-video.mp4");
+
+    return {
+      tempPath: outputPath,
+      fileName,
+      size,
+      contentType: response.headers?.["content-type"] || "video/mp4",
+    };
+  };
+
+  const downloadFromStream = async (streamUrl, fallbackName) => {
+    const response = await axios.get(streamUrl, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
+        Accept: "*/*",
+      },
+      httpAgent: HTTP_AGENT,
+      httpsAgent: HTTPS_AGENT,
+      maxRedirects: 5,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      validateStatus: () => true,
+    });
+
+    if (response.status >= 400) {
+      const errorText = await readStreamToText(response.data).catch(() => "");
+      let parsed = null;
+      try {
+        parsed = JSON.parse(errorText);
+      } catch {}
+      throw new Error(extractApiError(parsed || { message: errorText }, response.status));
+    }
+
+    return await downloadFromResponse(response, fallbackName);
+  };
 
   try {
-    await pipeline(response.data, fs.createWriteStream(outputPath, { highWaterMark: 1024 * 1024 }));
+    const response = await axios.get(API_YTMP4_URL, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      params: {
+        mode: "file",
+        url: videoUrl,
+        quality,
+        fast,
+      },
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
+        Accept: "*/*",
+      },
+      httpAgent: HTTP_AGENT,
+      httpsAgent: HTTPS_AGENT,
+      maxRedirects: 5,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      validateStatus: () => true,
+    });
+
+    if (response.status >= 400) {
+      const errorText = await readStreamToText(response.data).catch(() => "");
+      let parsed = null;
+      try {
+        parsed = JSON.parse(errorText);
+      } catch {}
+      throw new Error(extractApiError(parsed || { message: errorText }, response.status));
+    }
+
+    return await downloadFromResponse(response, preferredName);
   } catch (error) {
-    await deleteFileSafe(outputPath);
-    throw error;
+    deleteFileSafe(outputPath);
+    const linkData = await getYtmp4Link(videoUrl, quality, fast);
+    if (!linkData?.remoteUrl) throw error;
+    return await downloadFromStream(linkData.remoteUrl, linkData.fileName || preferredName);
   }
-
-  const stat = await fsp.stat(outputPath).catch(() => null);
-  if (!stat?.size || stat.size < MIN_VIDEO_BYTES) {
-    await deleteFileSafe(outputPath);
-    throw new Error("El archivo MP4 descargado es inválido.");
-  }
-
-  return {
-    tempPath: outputPath,
-    fileName: normalizeMp4Name(preferredName || "youtube-video.mp4"),
-    size: stat.size,
-  };
 }
 
 async function sendRemoteMp4(sock, from, quoted, data) {
