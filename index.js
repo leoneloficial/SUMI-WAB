@@ -1328,6 +1328,36 @@ function extractCommandData(text, currentSettings) {
   };
 }
 
+function compactJidForLog(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const base = raw.split("@")[0].split(":")[0];
+  const digits = base.replace(/[^\d]/g, "");
+  return digits || base;
+}
+
+function formatPhoneForLog(value = "") {
+  const compact = compactJidForLog(value);
+  if (!compact) return "desconocido";
+  return /^\d+$/.test(compact) ? `+${compact}` : compact;
+}
+
+function formatCommandConsoleLog(commandData = {}, message = {}, from = "") {
+  const prefix = String(commandData?.prefix || ".").trim() || ".";
+  const commandName = String(commandData?.commandName || "").trim().toLowerCase();
+  const argsText = Array.isArray(commandData?.args)
+    ? String(commandData.args.join(" ") || "").trim()
+    : "";
+  const shownArgs = argsText.length > 52 ? `${argsText.slice(0, 49)}...` : argsText;
+  const commandText = `${prefix}${commandName}${shownArgs ? ` ${shownArgs}` : ""}`;
+  const user = formatPhoneForLog(message?.senderPhone || message?.sender);
+  const chatId = compactJidForLog(from);
+  const scope = String(from || "").endsWith("@g.us")
+    ? `grupo:${chatId || "desconocido"}`
+    : `privado:${user}`;
+  return `CMD ${commandText} | user ${user} | ${scope}`;
+}
+
 const GLOBAL_COMMAND_ALIAS_MAP = new Map([
   // sistema
   ["ayuda", "menu"],
@@ -1862,6 +1892,7 @@ const ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN = parseBooleanEnv(
   false
 );
 const LOG_COMMAND_LOADS = parseBooleanEnv("LOG_COMMAND_LOADS", false);
+const LOG_COMMAND_EXECUTIONS = parseBooleanEnv("LOG_COMMAND_EXECUTIONS", true);
 const CONSOLE_BOOT_ANIMATION = parseBooleanEnv("CONSOLE_BOOT_ANIMATION", false);
 const CONSOLE_BOOT_FRAME_DELAY_MS = Math.max(
   90,
@@ -5302,36 +5333,12 @@ function buildDashboardFrame(params = {}) {
   } = params;
 
   const contentWidth = Math.max(72, bodyWidth - 2);
-  const systemTitle = `${String(botName || "FSOCIETY BOT").trim().toUpperCase()} : COMMAND DASHBOARD`;
+  const systemTitle = `${String(botName || "FSOCIETY BOT").trim().toUpperCase()} CONTROL PANEL`;
   const statusLabel = bootReady ? "ONLINE" : "BOOTING";
   const lines = [];
   const row = (text = "") => {
     const clipped = String(text || "").slice(0, contentWidth);
-    lines.push(`┃${clipped.padEnd(contentWidth, " ")}┃`);
-  };
-  const emptyRow = () => row("");
-  const buildSolidBar = (percent = 0, width = 20, emptyChar = "░") => {
-    const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
-    const safeWidth = Math.max(8, Number(width || 20));
-    const filled = Math.round((normalizedPercent / 100) * safeWidth);
-    return `${"█".repeat(filled)}${emptyChar.repeat(Math.max(0, safeWidth - filled))}`;
-  };
-  const addSection = (title, sectionLines) => {
-    const inset = 3;
-    const topPrefix = `${" ".repeat(inset)}╭─ ${title} `;
-    const topFill = Math.max(0, contentWidth - topPrefix.length - 1);
-    row(`${topPrefix}${"─".repeat(topFill)}╮`);
-
-    const bodyPrefix = `${" ".repeat(inset)}│  `;
-    const bodyWidth = Math.max(10, contentWidth - bodyPrefix.length - 1);
-    for (const line of sectionLines) {
-      const safe = String(line || "").slice(0, bodyWidth);
-      row(`${bodyPrefix}${safe.padEnd(bodyWidth, " ")}│`);
-    }
-
-    const bottomPrefix = `${" ".repeat(inset)}╰`;
-    const bottomFill = Math.max(0, contentWidth - bottomPrefix.length - 1);
-    row(`${bottomPrefix}${"─".repeat(bottomFill)}╯`);
+    lines.push(`║${clipped.padEnd(contentWidth, " ")}║`);
   };
   const compactProcess = String(processLabel || "STABLE")
     .replaceAll("_", " ")
@@ -5341,43 +5348,40 @@ function buildDashboardFrame(params = {}) {
   const eventLines = activityLogs.length
     ? activityLogs.slice(-2).map((line) => `➤ ${String(line || "").replace(/^[✓↻]\s*/u, "")}`)
     : ["➤ Core initialized", "➤ Ready for command traffic"];
-  const netPct = Math.max(1, Math.min(99, Number(telemetry.netPct || 0)));
+  const netPct = Math.max(0, Math.min(99, Number(telemetry.netPct || 0)));
 
-  lines.push(`┏${"━".repeat(contentWidth)}┓`);
+  lines.push(`╔${"═".repeat(contentWidth)}╗`);
   row(
     composeDashboardHeader(
-      `  ⟦ ${systemTitle} ⟧`,
-      `${onlinePulse} ${statusLabel}`,
+      `  ⚡ ${systemTitle}`,
+      `${statusLabel} ${onlinePulse}`,
       contentWidth
     )
   );
   row(
     composeDashboardHeader(
-      `  ◇ Process: ${compactProcess}   ◇ Session: ${sessionLabel}`,
+      `  Process ${compactProcess} | Session ${sessionLabel}`,
       `Build ${versionLabel}`,
       contentWidth
     )
   );
-  lines.push(`┣${"━".repeat(contentWidth)}┫`);
-  emptyRow();
-
-  addSection("OPERATOR INFO", [
-    `◉ Name        ${ownerName.toUpperCase()}`,
-    `◉ Prefix      ${prefixValue}`,
-    `◉ Commands    ${commandCount}`,
-    `◉ Runtime     ${compactProcess} | Session: ${sessionLabel}`,
-    `◉ Config      ${compactEnabled}`,
-  ]);
-  emptyRow();
-
-  addSection("SYSTEM STATUS", [
-    `CPU ${String(telemetry.cpuPct).padStart(2, " ")}% | RAM ${String(telemetry.ramPct).padStart(2, " ")}% | NET ${String(netPct).padStart(2, " ")}% (${Number(telemetry.netMbps || 0).toFixed(2)} Mbps)`,
-    `LAT ${String(telemetry.latencyMs).padStart(3, " ")} ms | MEM ${telemetry.usedRamGb.toFixed(1)}/${telemetry.totalRamGb.toFixed(1)} GB`,
-    ...eventLines,
-  ]);
-
-  row(bootReady ? "  SISTEMA LISTO." : "  ARRANQUE EN PROGRESO...");
-  lines.push(`┗${"━".repeat(contentWidth)}┛`);
+  lines.push(`╠${"═".repeat(contentWidth)}╣`);
+  row(`  Owner   : ${ownerName.toUpperCase()}`);
+  row(`  Prefix  : ${prefixValue}`);
+  row(`  Commands: ${commandCount} | Config: ${compactEnabled}`);
+  lines.push(`╟${"─".repeat(contentWidth)}╢`);
+  row(
+    `  CPU ${String(telemetry.cpuPct).padStart(2, " ")}% | RAM ${String(telemetry.ramPct).padStart(2, " ")}% | NET ${String(netPct).padStart(2, " ")}% (${Number(telemetry.netMbps || 0).toFixed(2)} Mbps)`
+  );
+  row(
+    `  LAT ${String(telemetry.latencyMs).padStart(3, " ")} ms | MEM ${telemetry.usedRamGb.toFixed(1)}/${telemetry.totalRamGb.toFixed(1)} GB`
+  );
+  for (const line of eventLines) {
+    row(`  ${line}`);
+  }
+  lines.push(`╟${"─".repeat(contentWidth)}╢`);
+  row(bootReady ? "  SISTEMA LISTO PARA COMANDOS." : "  INICIANDO SERVICIOS...");
+  lines.push(`╚${"═".repeat(contentWidth)}╝`);
 
   return lines;
 }
@@ -7419,6 +7423,14 @@ async function handleIncomingMessages(botState, sock, messages) {
       if (!allowed) continue;
       const blockedByMaintenance = await isBlockedByMaintenance(cmd, commandContext);
       if (blockedByMaintenance) continue;
+
+      if (LOG_COMMAND_EXECUTIONS) {
+        logBotEvent(
+          botState,
+          "info",
+          formatCommandConsoleLog(commandData, m, from)
+        );
+      }
 
       totalComandos++;
       trackCommandUsage(botState, m, commandData.commandName);
