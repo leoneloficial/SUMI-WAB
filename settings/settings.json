@@ -15,7 +15,7 @@
       "slot": 1,
       "enabled": true,
       "label": "SUBBOT1",
-      "name": "Fsociety Subbot 1",
+      "name": "sumi Subbot 1",
       "authFolder": "dvyer-session-subbot",
       "pairingNumber": ""
     },
@@ -23,7 +23,7 @@
       "slot": 2,
       "enabled": false,
       "label": "SUBBOT2",
-      "name": "Fsociety Subbot 2",
+      "name": "sumi Subbot 2",
       "authFolder": "dvyer-session-subbot-2",
       "pairingNumber": ""
     },
@@ -31,7 +31,7 @@
       "slot": 3,
       "enabled": false,
       "label": "SUBBOT3",
-      "name": "Fsociety Subbot 3",
+      "name": "sumi Subbot 3",
       "authFolder": "dvyer-session-subbot-3",
       "pairingNumber": ""
     },
@@ -39,7 +39,7 @@
       "slot": 4,
       "enabled": false,
       "label": "SUBBOT4",
-      "name": "Fsociety Subbot 4",
+      "name": "sumi Subbot 4",
       "authFolder": "dvyer-session-subbot-4",
       "pairingNumber": ""
     },
@@ -47,7 +47,7 @@
       "slot": 5,
       "enabled": false,
       "label": "SUBBOT5",
-      "name": "Fsociety Subbot 5",
+      "name": "sumi Subbot 5",
       "authFolder": "dvyer-session-subbot-5",
       "pairingNumber": ""
     },
@@ -55,7 +55,7 @@
       "slot": 6,
       "enabled": false,
       "label": "SUBBOT6",
-      "name": "Fsociety Subbot 6",
+      "name": "sumi Subbot 6",
       "authFolder": "dvyer-session-subbot-6",
       "pairingNumber": ""
     },
@@ -63,7 +63,7 @@
       "slot": 7,
       "enabled": false,
       "label": "SUBBOT7",
-      "name": "Fsociety Subbot 7",
+      "name": "sumi Subbot 7",
       "authFolder": "dvyer-session-subbot-7",
       "pairingNumber": ""
     },
@@ -71,7 +71,7 @@
       "slot": 8,
       "enabled": false,
       "label": "SUBBOT8",
-      "name": "Fsociety Subbot 8",
+      "name": "sumi Subbot 8",
       "authFolder": "dvyer-session-subbot-8",
       "pairingNumber": ""
     },
@@ -79,7 +79,7 @@
       "slot": 9,
       "enabled": false,
       "label": "SUBBOT9",
-      "name": "Fsociety Subbot 9",
+      "name": "sumi Subbot 9",
       "authFolder": "dvyer-session-subbot-9",
       "pairingNumber": ""
     },
@@ -87,7 +87,7 @@
       "slot": 10,
       "enabled": false,
       "label": "SUBBOT10",
-      "name": "Fsociety Subbot 10",
+      "name": "sumi Subbot 10",
       "authFolder": "dvyer-session-subbot-10",
       "pairingNumber": ""
     },
@@ -95,7 +95,7 @@
       "slot": 11,
       "enabled": false,
       "label": "SUBBOT11",
-      "name": "Fsociety Subbot 11",
+      "name": "sumi Subbot 11",
       "authFolder": "dvyer-session-subbot-11",
       "pairingNumber": ""
     },
@@ -103,7 +103,7 @@
       "slot": 12,
       "enabled": false,
       "label": "SUBBOT12",
-      "name": "Fsociety Subbot 12",
+      "name": "sumi Subbot 12",
       "authFolder": "dvyer-session-subbot-12",
       "pairingNumber": ""
     },
@@ -111,7 +111,7 @@
       "slot": 13,
       "enabled": false,
       "label": "SUBBOT13",
-      "name": "Fsociety Subbot 13",
+      "name": "sumi Subbot 13",
       "authFolder": "dvyer-session-subbot-13",
       "pairingNumber": ""
     },
@@ -119,7 +119,7 @@
       "slot": 14,
       "enabled": false,
       "label": "SUBBOT14",
-      "name": "Fsociety Subbot 14",
+      "name": "sumi Subbot 14",
       "authFolder": "dvyer-session-subbot-14",
       "pairingNumber": ""
     },
@@ -127,7 +127,7 @@
       "slot": 15,
       "enabled": false,
       "label": "SUBBOT15",
-      "name": "Fsociety Subbot 15",
+      "name": "sumi Subbot 15",
       "authFolder": "dvyer-session-subbot-15",
       "pairingNumber": ""
     }
@@ -147,6 +147,6 @@
   "newsletter": {
     "enabled": true,
     "jid": "120363354701957370@newsletter",
-    "name": "Fsociety bot"
+    "name": "❤️sumi sakurasawa❤️"
   }
 }
